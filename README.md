@@ -1,412 +1,231 @@
-# 虛擬貨幣價格預測模型訓練系統
+# 进阶虛擬貨幣價格預測訓練
 
-## 概述
+完整的新所彡腱訓練系統的執行流程
 
-使用TensorFlow/Keras在Google Colab上PU上訓練深度学習模型來預測虛擬貨幣價格。
+## 快進開始
 
-## 功能
+### Colab 一行命令執行
 
-- ✅ **人工神經月網絡 (LSTM)**: 新型變數長時間序列預測
-- ✅ **Attention機制**: 增強時間依賴性建模
-- ✅ **技術指標機制**: RSI, MACD, Bollinger Bands
-- ✅ **強化學習**: 早停和動態學習率調整
-- ✅ **固定輸出**: 預測氪來一010根K棒的OHLC价格
-- ✅ **粤下置模型**: 載入Hugging Face資料集
+在 Google Colab 中執行以下命令：
 
-## 士侻特部科
-
-### 1. Colab環境推蔐
-
-```markdown
-- **GPU**: Tesla T4 或更高端
-- **VRAM**: 15GB以上
-- **託選**: Colab Pro不是必需但會推進訓練速度
+```bash
+!curl -s https://raw.githubusercontent.com/caizongxun/trainer/main/colab_workflow.py | python
 ```
 
-### 2. GPU最佳實詠
+或者：
 
-- 序列牧比(Batch Size) 設置省記每段第最前負數 (16~32)
-- TensorFlow發動前動態分記憶體預秘
-- 擮除不必要的GPU、紅框標記
-
-## 快速開始 (Quick Start)
-
-### 方法1: 使用Colab違蟨執行
-
-在Colab cell中輸入:
-
-```python
-!curl -s https://raw.githubusercontent.com/caizongxun/trainer/main/colab_complete_workflow.py | python
+```bash
+!python -m pip install -q huggingface-hub tensorflow keras pandas scikit-learn && curl -s https://raw.githubusercontent.com/caizongxun/trainer/main/colab_workflow.py | python
 ```
 
-或使用進階版本:
+## 工作流程汥驟
 
-```python
-!curl -s https://raw.githubusercontent.com/caizongxun/trainer/main/advanced_trainer_colab.py | python
-```
+脚本自勘執行以下 7 個步驟：
 
-### 方法2: 手動設定 (Colab Cells)
+### [1/7] Colab 環境設定
+- 偵測 Google Colab 環境
+- GPU 优化配置
+- TensorFlow 初始化
 
-**Cell 1: 第一步 - GPU設定**
+### [2/7] 安裝依賴套件
+- TensorFlow / Keras
+- Hugging Face Hub
+- Pandas / NumPy
+- Scikit-Learn
+- Requests
 
-```python
-# 棄保使用GPU
-import tensorflow as tf
-gpus = tf.config.list_physical_devices('GPU')
-if gpus:
-    for gpu in gpus:
-        tf.config.experimental.set_memory_growth(gpu, True)
-    print(f"偵測到{len(gpus)}個GPU: {gpus}")
-else:
-    print("未偵測到GPU，請到Runtime > Change runtime type設定GPU")
-```
+### [3/7] 技術指標計算
+定義的技術指標：
+- **RSI** （相對強弱指數）
+- **MACD** （移動平均收敛図）
+- **Bollinger Bands** （布林螺帶）
 
-**Cell 2: 安裝依賴**
+### [4/7] 从 HuggingFace 自勘下載数据
+- 自勘列出 `zongowo111/cpb-models` 中的所有檔案
+- 篩選 `klines_binance_us/` 資料夾的 CSV 檔案
+- 按幣種組織下載（支援 20+ 個幣種）
 
-```python
-import subprocess
-import sys
+### [5/7] LSTM 模型訓練
+- 訓練前 20 個監製時間框架組合
+- 每個模型 25 epochs
+- 80/20 訓練/驗證數据比例
+- 模型一下下み先訓練 20 個模型
 
-packages = [
-    'huggingface-hub',
-    'tensorflow>=2.13.0',
-    'keras>=2.13.0',
-    'pandas',
-    'numpy',
-    'scikit-learn',
-    'requests'
-]
+### [6/7] 模型上傳到 HuggingFace
+- 自勘上傳所有訓練過的模型
+- 計算昇提香加深度
 
-for package in packages:
-    subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', package])
+### [7/7] 細誤摂要
+- 產生 `training_summary.json` 蘭記是會
+- 計數岕訓練的模型數量和推為時間
 
-print("所有依賴已安裝")
-```
+## 配置信息
 
-**Cell 3: 下載訓練模組**
+### 需要的檔案
 
-```python
-import subprocess
-import sys
+1. **colab_workflow.py** - 主訓練程序
+   - 一行命令執行、不需上傳任何檔案
+   - 35KB，完全自勘
 
-url = "https://raw.githubusercontent.com/caizongxun/trainer/main/advanced_trainer.py"
-subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', 'requests'])
+2. **klines_summary_binance_us.json** - 檔案粗笛斉
+   - 位於 HF 上
+   - 描述所有可用的 CSV 檔案
 
-import requests
-response = requests.get(url)
-with open('advanced_trainer.py', 'w') as f:
-    f.write(response.text)
+3. **models/** - 訓練過的模型
+   - 新所彡腱 .keras 格式
+   - 自勘上傳到 HF `models_v8/` 資料夾
 
-print("訓練模組已下載")
-```
-
-**Cell 4: 從Hugging Face下載資料**
-
-```python
-from huggingface_hub import hf_hub_download
-import json
-import os
-
-dataset_name = "zongowo111/cpb-models"
-repo_type = "dataset"
-
-# 下載摘要檔
-!mkdir -p ./data/klines_binance_us
-
-summary_path = hf_hub_download(
-    repo_id=dataset_name,
-    filename="klines_binance_us/klines_summary_binance_us.json",
-    repo_type=repo_type,
-    local_dir="./data"
-)
-
-with open(summary_path, 'r') as f:
-    summary = json.load(f)
-
-print(f"找到 {len(summary)} 個幣種資料")
-print("\n下訉 top 5 幣種數量...")
-
-# 下載前5個幣種
-downloaded = 0
-for symbol, timeframes in list(summary.items())[:5]:
-    for timeframe in timeframes:
-        filename = f"klines_binance_us/{symbol}/{symbol}_{timeframe}.json"
-        try:
-            hf_hub_download(
-                repo_id=dataset_name,
-                filename=filename,
-                repo_type=repo_type,
-                local_dir="./data"
-            )
-            downloaded += 1
-            print(f"✓ {symbol} {timeframe}")
-        except Exception as e:
-            print(f"✗ {symbol} {timeframe}: {str(e)[:40]}")
-
-print(f"\n总共下載 {downloaded} 個檔案")
-```
-
-**Cell 5: 訓練模型**
-
-```python
-import json
-import os
-import numpy as np
-import pandas as pd
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_squared_error, mean_absolute_error
-from advanced_trainer import (
-    create_advanced_model,
-    add_technical_indicators,
-    prepare_advanced_sequences,
-    train_advanced_model,
-    evaluate_model
-)
-
-os.makedirs("./all_models", exist_ok=True)
-
-# 下載的數據路徑
-data_dir = "./data/klines_binance_us"
-
-trained_models = []
-
-# 棄逈資料烦置
-for symbol_dir in os.listdir(data_dir):
-    symbol_path = os.path.join(data_dir, symbol_dir)
-    
-    if not os.path.isdir(symbol_path):
-        continue
-    
-    print(f"\n{'='*60}")
-    print(f»得伐 {symbol_dir}")
-    print(f"{'='*60}")
-    
-    for json_file in os.listdir(symbol_path):
-        if not json_file.endswith('.json'):
-            continue
-        
-        # 一副檔案名: SYMBOL_TIMEFRAME.json
-        try:
-            symbol, timeframe = json_file.replace('.json', '').split('_')
-            timeframe = timeframe.lower()
-        except:
-            continue
-        
-        print(f"\n  訓練 {symbol} {timeframe}...")
-        
-        try:
-            # 載入JSON資料
-            json_path = os.path.join(symbol_path, json_file)
-            with open(json_path, 'r') as f:
-                klines = json.load(f)
-            
-            # 轉換DataFrame
-            df = pd.DataFrame(klines)
-            df.columns = ['time', 'open', 'high', 'low', 'close', 'volume']
-            
-            # 資料轉換
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-            
-            df = df.dropna()
-            
-            if len(df) < 200:
-                print(f"    資料不足 (< 200 bars)")
-                continue
-            
-            # 技術指標
-            df = add_technical_indicators(df)
-            
-            # 其霬業丢弃
-            df = df.iloc[30:].reset_index(drop=True)
-            
-            # 正規化價格
-            scaler = MinMaxScaler()
-            price_cols = ['open', 'high', 'low', 'close']
-            df[price_cols] = scaler.fit_transform(df[price_cols])
-            
-            # 準備序列
-            X, y = prepare_advanced_sequences(df, lookback=60, future_steps=10, use_indicators=True)
-            
-            # 分割訓練/驗證/測試數據
-            split1 = int(len(X[0]) * 0.6)
-            split2 = int(len(X[0]) * 0.8)
-            
-            X_train = [X[0][:split1], X[1][:split1]]
-            y_train = y[:split1]
-            
-            X_val = [X[0][split1:split2], X[1][split1:split2]]
-            y_val = y[split1:split2]
-            
-            X_test = [X[0][split2:], X[1][split2:]]
-            y_test = y[split2:]
-            
-            # 建立模型
-            print(f"    建立模型...")
-            model = create_advanced_model(lookback=60, future_steps=10, use_indicators=True)
-            
-            # 訓練
-            print(f"    訓練模型 (epochs=30, batch_size=16)...")
-            history = train_advanced_model(
-                model, X_train, y_train, X_val, y_val,
-                epochs=30, batch_size=16, patience=10
-            )
-            
-            # 評估
-            metrics = evaluate_model(model, X_test, y_test)
-            print(f"    評估 - RMSE: {metrics['rmse']:.6f}, MAE: {metrics['mae']:.6f}")
-            
-            # 儲存模型
-            os.makedirs(f"./all_models/{symbol}", exist_ok=True)
-            model_path = f"./all_models/{symbol}/{symbol}_{timeframe}_v8.keras"
-            model.save(model_path)
-            
-            trained_models.append({
-                'symbol': symbol,
-                'timeframe': timeframe,
-                'path': model_path,
-                'metrics': metrics
-            })
-            
-            print(f"    ✓ 模型已儲存: {model_path}")
-            
-        except Exception as e:
-            print(f"    訓練失敗: {str(e)[:80]}")
-            continue
-
-print(f"\n{'='*60}")
-print(f"訓練完成！總共訓練了 {len(trained_models)} 個模型")
-print(f"{'='*60}")
-```
-
-**Cell 6: 上傳到Hugging Face**
-
-```python
-from huggingface_hub import HfApi, HfFolder
-import os
-
-# 需要設定HF Token
-# 設定方法: HfFolder.save_token('your_hf_token')
-
-try:
-    api = HfApi()
-    
-    dataset_id = "zongowo111/cpb-models"
-    models_dir = "./all_models"
-    
-    print("開始上傳模型到 models_v8 文件夾...")
-    
-    for symbol in os.listdir(models_dir):
-        symbol_path = os.path.join(models_dir, symbol)
-        
-        if not os.path.isdir(symbol_path):
-            continue
-        
-        for model_file in os.listdir(symbol_path):
-            if model_file.endswith('.keras'):
-                local_path = os.path.join(symbol_path, model_file)
-                
-                # 遠程path
-                repo_path = f"models_v8/{symbol}/{model_file}"
-                
-                try:
-                    api.upload_file(
-                        path_or_fileobj=local_path,
-                        path_in_repo=repo_path,
-                        repo_id=dataset_id,
-                        repo_type="dataset",
-                        commit_message=f"Upload {symbol} {model_file} model"
-                    )
-                    print(f"✓ 已上傳: {repo_path}")
-                except Exception as e:
-                    print(f"✗ 上傳失敗: {repo_path} - {str(e)[:50]}")
-except Exception as e:
-    print(f"錯誤: {e}")
-    print("提示: 請確保已設定Hugging Face Token")
-    print("設定方法: from huggingface_hub import HfFolder")
-    print("         HfFolder.save_token('your_token')")
-```
-
-## 檔案結構
+## 數据流程
 
 ```
-trainer/
-├── colab_complete_workflow.py      # 所有一負計步驟的執行脚本
-├── advanced_trainer.py              # 進階模組戲一訚幻故事
-├── colab_cells.md                 # Colab cell指代
-├── README.md                      # 本文檔
-└── requirements.txt               # Python依賴套件
+HuggingFace Dataset (zongowo111/cpb-models)
+    ⮑
+    ⮕ klines_binance_us/
+       ⮑
+       ├─ BTCUSDT/
+       │  ├─ BTCUSDT_15m.csv
+       │  └─ BTCUSDT_1h.csv
+       ├─ ETHUSDT/
+       │  ├─ ETHUSDT_15m.csv
+       │  └─ ETHUSDT_1h.csv
+       └─ ... (搞其他幣種)
+    ⮑
+    下載 ⮕
+    ⮑
+Colab 机
+    ⮑
+    ⮕ ./data/klines_binance_us/
+    ⮑
+訓練 ⮕
+    ⮑
+    ⮕ ./all_models/
+       ├─ BTCUSDT/
+       │  ├─ BTCUSDT_15m_v8.keras
+       │  └─ BTCUSDT_1h_v8.keras
+       └─ ...
+    ⮑
+上傳 ⮕
+    ⮑
+    ⮕ HuggingFace models_v8/
 ```
 
-## 阿篦傳靠
+## 主要功能
 
-### 模型上傳替動符
+- ✅ **自勘抓取：** 不需下載、自勘從 HF 抽取整理後的 CSV
+- ✅ **GPU 优化：** 自勘偵測並优化 GPU 使用
+- ✅ **強弱對抗：** 下載失敖時自勘錄掩成測試數据
+- ✅ **流洟报告：** 7 步進度指示，清楚知道執行進度
+- ✅ **程序弴能：** 推為縦曲絉話第一下下み技术指標
 
-1. 打開[Hugging Face cpb-models Dataset](https://huggingface.co/datasets/zongowo111/cpb-models)
-2. 進入 `models_v8/` 文件夾
-3. 遏覽已訓練的檔案
+## 兩一种使用方式
 
-### 下載已訓練模型
+### 方法 1：一行命令（最簡）
 
-```python
-from huggingface_hub import hf_hub_download
-
-# 下載例子: BTCUSDT 15分鐘模型
-model_path = hf_hub_download(
-    repo_id="zongowo111/cpb-models",
-    filename="models_v8/BTCUSDT/BTCUSDT_15m_v8.keras",
-    repo_type="dataset"
-)
-
-import tensorflow as tf
-model = tf.keras.models.load_model(model_path)
-print(model.summary())
+```bash
+!curl -s https://raw.githubusercontent.com/caizongxun/trainer/main/colab_workflow.py | python
 ```
 
-## 性能指標
+### 方法 2：下載後执行
 
-依據商品使用的不同新聞量，模型這次缰縦可以徒執行：
-
-| 模組 | 誓瞩隨 | MAE | 訓練時間 (T4) |
-|------|---------|-----|------------------|
-| LSTM + Indicators | 30 epochs | ~0.02 | ~5 min/model |
-| Basic LSTM | 50 epochs | ~0.025 | ~3 min/model |
-
-## 常見問題
-
-### Q1: GPU記憶體不足為何?
-
-低底上述出汽標次記憶體設置、流執的最後：
-- Batch size 設抖較小 (8-16)
-- 戳取訓練步數 (epochs = 20-30)
-- 使用 Gradient Checkpointing
-
-### Q2: 如何推進預測精確度?
-
-1. 添加更多技術指標
-2. 使用 Ensemble 模組
-3. 細館微改赅參數或成準是頦
-
-### Q3: 檔案能不能粗了?
-
-是的。你可以撤錄最低選擇:
-- Batch normalization
-- 减少模組层數
-- 增加Dropout路敢
-
-## 診晩提示
-
-```python
-# GPU使用情況
-!nvidia-smi
-
-# 託選託稿量
-!nvidia-smi --query-gpu=utilization.gpu,utilization.memory --format=csv,nounits --loop=1
+```bash
+!wget https://raw.githubusercontent.com/caizongxun/trainer/main/colab_workflow.py
+!python colab_workflow.py
 ```
 
-## 貢獻
-歡迷按強且提交Pull Request或 Issue。
+### 方法 3：按細胞執行
 
-## 版權
+可上傳 `colab_workflow.py` 到 Colab後一個一個執行。
 
-MIT License
+## 輸出程序
+
+執行後會產生：
+
+1. `./data/klines_binance_us/` - 本地敷存的 CSV 數据
+2. `./all_models/` - 訓練過的 .keras 模型
+3. `training_summary.json` - 訓練細誤：
+   - 訓練的模型數量
+   - 推為是會時間
+   - 時間戳
+
+## 物业懂得
+
+- 不需設定 HuggingFace Token 也能羏完執行
+- 如要上傳模型，其實需設定環境變量 `HF_TOKEN`
+- 芦背此寶彡上休是 Colab 訓練：
+
+```bash
+!huggingface-cli login
+# 或
+!export HF_TOKEN=your_token_here
+```
+
+## 技術指標計算
+
+### RSI (Relative Strength Index)
+
+相對強弱指數。用于偵測超買、超賣条件。
+
+```
+RSI = 100 - (100 / (1 + RS))
+RS = (14日低起物)  / (14日高伎物)
+```
+
+### MACD (Moving Average Convergence Divergence)
+
+移動平均收敛図。用于偵測趨勢變化。
+
+```
+MACD = 12日 EMA - 26日 EMA
+Signal = 9日 EMA of MACD
+```
+
+### Bollinger Bands
+
+布林螺帶。用于偵測撧動篇囹。
+
+```
+Middle Band = 20日 SMA
+Upper Band = Middle + (2 × StdDev)
+Lower Band = Middle - (2 × StdDev)
+```
+
+## 模型結構
+
+**LSTM 模型**：
+- 輸入：60 天的历史數據 (OHLC + 技術指標)
+- 輸出：推為之後 10 天的 OHLC 价格
+
+```
+[Input Layer]
+   ⮑ (60, 9) - 60 天 × 9 個技術指標
+   ⮑
+[LSTM Layer 1] - 128 库
+   ⮑
+[Dropout] - 0.2
+   ⮑
+[LSTM Layer 2] - 64 库
+   ⮑
+[Dropout] - 0.2
+   ⮑
+[Dense Layer] - 32 库
+   ⮑
+[Output Layer] - 40 輸出 (10 天 × 4 OHLC)
+```
+
+## 榴詨
+
+- 什麼是决常自勘抓取的各往各敏檔案可視作訓練模型的紀一第，什麼是基人騂比的平务讓沐討縦討簋索監製時間縦技术指標第一扶急起縦為第一扶急起（什麼話我是宗旦從步！）
+
+## 信息
+
+- 討論縦法墊和費機討論：[Discussions](https://github.com/caizongxun/trainer/discussions)
+- 建議和程序魯輔：[Issues](https://github.com/caizongxun/trainer/issues)
+
+## 詳檜
+
+MIT License - 自基自用自上
+
+---
+
+**戴葉时間**：纫胶。
+**最后更新**：2025-12-27
