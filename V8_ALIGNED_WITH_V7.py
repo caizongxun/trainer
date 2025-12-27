@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 V8 完全對標 V7 版本
+訓練 20 種幣種（80 個幣種對）
 
 V7 的成功參數配置:
 - Lookback: 60
@@ -209,7 +210,7 @@ try:
             pairs_to_train.append((symbol, timeframe, local_path))
     
     print_success(f"總共下載 {downloaded_count} 個檔案")
-    print_success(f"準備訓練 {min(10, len(pairs_to_train))} 個模型")
+    print_success(f"準備訓練 {min(80, len(pairs_to_train))} 個模型 (20種幣種)")
     
 except Exception as e:
     print_error(f"下載失敗: {e}")
@@ -284,9 +285,11 @@ def create_seq2seq_v8_v7aligned(input_shape: Tuple[int, int], forecast_horizon: 
 trained_count = 0
 training_results = []
 
-for idx, (symbol, timeframe, csv_path) in enumerate(pairs_to_train[:10], 1):
+# 訓練 20 種幣種 (80 個幣種對 / 2 個時間框架)
+max_pairs = min(80, len(pairs_to_train))
+for idx, (symbol, timeframe, csv_path) in enumerate(pairs_to_train[:max_pairs], 1):
     train_start = time.time()
-    print(f"\n  [{idx}/10] {symbol} {timeframe}", end=' ', flush=True)
+    print(f"\n  [{idx}/{max_pairs}] {symbol} {timeframe}", end=' ', flush=True)
     
     try:
         if csv_path and os.path.exists(csv_path):
