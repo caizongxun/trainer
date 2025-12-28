@@ -40,8 +40,18 @@
 
 ## 上傳到 HuggingFace
 
-腳本第 6 步會要求輸入 HuggingFace token。
+由於 `curl | python` 的執行型態在 Colab 上容易讓 `getpass()` 讀不到互動輸入，因此 V9 腳本改為以下順序取得 token：
 
-- 直接 Enter：跳過上傳。
-- 輸入 token：會使用 `upload_folder()` 將本地 `./all_models/models_v9/` 一次上傳到 dataset repo `zongowo111/cpb-models` 的 `models_v9/` 目錄。
+1. 讀取環境變數 `HF_TOKEN`
+2. 或以參數 `--hf_token` 傳入
+3. 否則使用 `input()` 互動輸入（在 Colab 可用）
+
+建議用環境變數方式（最穩定）：
+
+```bash
+import os
+os.environ["HF_TOKEN"] = "YOUR_TOKEN"
+```
+
+然後再跑訓練腳本，上傳步驟會自動使用此 token。
 
