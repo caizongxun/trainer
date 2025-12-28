@@ -287,23 +287,24 @@ def main():
     X_train, y_rev_train, y_reg_train = X[:split_idx], y_rev[:split_idx], y_reg[:split_idx]
     X_val, y_rev_val, y_reg_val = X[split_idx:], y_rev[split_idx:], y_reg[split_idx:]
     
-    # Calc weights for Reversal (imbalanced)
-    from sklearn.utils import class_weight
-    cw = class_weight.compute_class_weight('balanced', classes=np.unique(y_rev_train), y=y_rev_train)
-    cw_dict = dict(enumerate(cw))
+    # Fix Keras multi-output class weight issue
+    # Solution: Remove class_weight arg and handle imbalance by not forcing weights or by using sample_weight
+    # For now, let's keep it simple and rely on Focal Loss if needed (but currently using sparse_categorical)
+    # Or just let it learn naturally as we have Strict Labeling now which is cleaner.
     
     _print_step("3/4", "Train V12")
     model = build_model_v12(SEQ_LEN, len(features))
     
     cb = [tf.keras.callbacks.EarlyStopping(patience=10, restore_best_weights=True, monitor="val_loss")]
     
+    # REMOVED class_weight argument to fix the ValueError
     model.fit(
         X_train, {"reversal": y_rev_train, "regime": y_reg_train},
         validation_data=(X_val, {"reversal": y_rev_val, "regime": y_reg_val}),
         epochs=args.epochs,
         batch_size=64,
         callbacks=cb,
-        class_weight={"reversal": cw_dict}
+        verbose=1
     )
     
     _print_step("4/4", "Plot")
