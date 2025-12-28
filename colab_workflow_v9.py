@@ -210,7 +210,7 @@ def build_model_v9_4(seq_len: int, n_feat: int, pred_len: int, lr: float):
     x = layers.Dropout(0.2)(x)
     
     # 4. Tanh Output Limiter
-    # Output is log-return. We constrain it to +/- 5% per step range to prevent explosions
+    # Output is log-return. We constrain it to +/- 0.10 per step range to prevent explosions
     raw_out = layers.Dense(pred_len)(x)
     # Scale Tanh: max possible movement is +/- 0.10 (approx 10%) relative to base
     # This prevents the model from ever predicting a 50% crash in 10 steps
@@ -262,8 +262,29 @@ def main():
     
     _print_step("2/5", "Data")
     from huggingface_hub import snapshot_download
-    path = snapshot_download(repo_id="zongowo111/cpb-models", allow_patterns=f"**/{args.symbol}_{args.interval}_*.csv")
-    csv_file = next((os.path.join(r, f) for r, _, fs in os.walk(path) for f in fs if f.endswith(".csv")), None)
+    
+    # Fix: Ensure we correctly fetch dataset by repo_type="dataset"
+    # Also handle file search more robustly
+    path = snapshot_download(
+        repo_id="zongowo111/cpb-models", 
+        repo_type="dataset",
+        allow_patterns=f"**/{args.symbol}_{args.interval}_*.csv"
+    )
+    
+    # Recursive search for the CSV file
+    csv_file = None
+    for root, _, files in os.walk(path):
+        for f in files:
+            if f.endswith(".csv") and args.symbol in f and args.interval in f:
+                csv_file = os.path.join(root, f)
+                break
+        if csv_file:
+            break
+            
+    if not csv_file:
+        raise ValueError(f"No CSV found for {args.symbol} {args.interval} in {path}")
+        
+    _print_kv("csv", csv_file)
     
     df = pd.read_csv(csv_file)
     df, features = add_price_features(df)
