@@ -194,8 +194,8 @@ class PipelineV3:
         print('[INFO] Training LightGBM...')
         m2 = lgb.LGBMRegressor(n_estimators=300, max_depth=8, learning_rate=0.05,
                                num_leaves=31, subsample=0.9, colsample_bytree=0.9,
-                               reg_alpha=0.1, reg_lambda=1.0, random_state=42, verbosity=-1)
-        m2.fit(Xt2, yvt_scaled, eval_set=[(Xv2, yvv_scaled)], verbose=False)
+                               reg_alpha=0.1, reg_lambda=1.0, random_state=42)
+        m2.fit(Xt2, yvt_scaled, eval_set=[(Xv2, yvv_scaled)])
         yp2 = m2.predict(Xte2)
         
         print('[INFO] Training CatBoost...')
