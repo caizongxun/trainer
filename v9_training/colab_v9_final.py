@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import subprocess, sys
+import subprocess, sys, os
 print('[SETUP] Installing packages...')
 for pkg in ['tensorflow>=2.13.0', 'xgboost>=2.0.0', 'datasets>=2.14.0', 'ta>=0.10.2', 'scikit-learn']:
     subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', pkg])
@@ -108,7 +108,7 @@ class Pipeline:
         print(f'[INFO] Shape: {d.shape}')
         return d
     
-    def step4(self, data, seq_len=60):
+    def step4(self, data, seq_len=60, future_steps=10):
         print('\n' + '='*80 + '\n[STEP 4/7] SEQUENCES\n' + '='*80)
         fc = [c for c in data.columns if c not in ['open_time', 'open', 'high', 'low', 'close', 'volume', 'close_time']]
         fc += ['open', 'high', 'low', 'close', 'volume']
@@ -117,17 +117,17 @@ class Pipeline:
         yd = (data['close'].shift(-1) > data['close']).astype(float).values
         yv = (data['atr'].values + 1e-10) / (data['close'].values + 1e-10)
         
-        def cs(d, t, sl):
+        def cs(d, t, sl, fs=1):
             xs, ys = [], []
-            for i in range(len(d) - sl):
+            for i in range(len(d) - sl - fs):
                 xs.append(d[i:i+sl])
-                ys.append(t[i+sl])
+                ys.append(t[i+sl+fs-1])
             return np.array(xs), np.array(ys)
         
-        print('[INFO] Creating sequences')
-        Xs, yps = cs(X, yp, seq_len)
-        _, yds = cs(X, yd, seq_len)
-        _, yvs = cs(X, yv, seq_len)
+        print(f'[INFO] Creating sequences (future_steps={future_steps})')
+        Xs, yps = cs(X, yp, seq_len, future_steps)
+        _, yds = cs(X, yd, seq_len, future_steps)
+        _, yvs = cs(X, yv, seq_len, future_steps)
         print(f'[INFO] Generated {len(Xs)} sequences')
         print('[INFO] Normalizing')
         Xsf = Xs.reshape(-1, Xs.shape[-1])
@@ -182,7 +182,7 @@ class Pipeline:
         return m
     
     def step6a(self, Xt, Xv, Xte, ydt, ydv, ydte):
-        print('\n' + '='*80 + '\n[STEP 6a/7] DIRECTION\n' + '='*80)
+        print('\n' + '='*80 + '\n[STEP 6a/7] DIRECTION (next candle)\n' + '='*80)
         m = self.build_dir((Xt.shape[1], Xt.shape[2]))
         cbs = [EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True),
                ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=10, min_lr=1e-6),
@@ -214,7 +214,7 @@ class Pipeline:
         self.results['volatility'] = {'rmse': float(rmse), 'mape': float(mape), 'r2': float(r2)}
     
     def step6c(self, Xt, Xv, Xte, ypt, ypv, ypte):
-        print('\n' + '='*80 + '\n[STEP 6c/7] PRICE\n' + '='*80)
+        print('\n' + '='*80 + '\n[STEP 6c/7] PRICE (10 candles ahead)\n' + '='*80)
         m = self.build_price((Xt.shape[1], Xt.shape[2]))
         cbs = [EarlyStopping(monitor='val_loss', patience=25, restore_best_weights=True),
                ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=15, min_lr=1e-7),
@@ -226,7 +226,7 @@ class Pipeline:
         r2 = r2_score(ypte, yp)
         print(f'[INFO] RMSE: {rmse:.4f}, MAPE: {mape:.4f}, R2: {r2:.4f}')
         m.save('price_model_v9.h5')
-        self.results['price'] = {'rmse': float(rmse), 'mape': float(mape), 'r2': float(r2)}
+        self.results['price'] = {'rmse': float(rmse), 'mape': float(mape), 'r2': float(r2), 'future_steps': 10}
     
     def step7(self):
         print('\n' + '='*80 + '\n[STEP 7/7] SAVE\n' + '='*80)
@@ -239,7 +239,7 @@ class Pipeline:
         df = self.step1()
         df = self.step2(df)
         df = self.step3(df)
-        X, yp, yd, yv = self.step4(df)
+        X, yp, yd, yv = self.step4(df, seq_len=60, future_steps=10)
         Xt, Xv, Xte, ypt, ypv, ypte, ydt, ydv, ydte, yvt, yvv, yvte = self.step5(X, yp, yd, yv)
         self.step6a(Xt, Xv, Xte, ydt, ydv, ydte)
         self.step6b(Xt, Xv, Xte, yvt, yvv, yvte)
