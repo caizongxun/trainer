@@ -132,23 +132,29 @@ class V9TrainingPipeline:
             self.log('Calculating RSI(14) and RSI(7)')
             data_ind['rsi_14'] = ta.momentum.rsi(data_ind['close'], window=14)
             data_ind['rsi_7'] = ta.momentum.rsi(data_ind['close'], window=7)
+            self.log('RSI calculated successfully')
             
             self.log('Calculating MACD')
-            macd = ta.trend.macd(data_ind['close'])
-            data_ind['macd'] = macd['MACD_12_26_9']
-            data_ind['macd_signal'] = macd['MACDh_12_26_9']
+            macd_obj = ta.trend.MACD(data_ind['close'])
+            data_ind['macd'] = macd_obj.macd()
+            data_ind['macd_signal'] = macd_obj.macd_signal()
+            data_ind['macd_diff'] = macd_obj.macd_diff()
+            self.log('MACD calculated successfully')
             
             self.log('Calculating Bollinger Bands')
-            bb = ta.volatility.bollinger_bands(data_ind['close'], window=20)
-            data_ind['bb_high'] = bb['BBH_20_2']
-            data_ind['bb_mid'] = bb['BBM_20_2']
-            data_ind['bb_low'] = bb['BBL_20_2']
-            data_ind['bb_width'] = (data_ind['bb_high'] - data_ind['bb_low']) / data_ind['bb_mid']
+            bb_obj = ta.volatility.BollingerBands(data_ind['close'], window=20)
+            data_ind['bb_high'] = bb_obj.bollinger_hband()
+            data_ind['bb_mid'] = bb_obj.bollinger_mavg()
+            data_ind['bb_low'] = bb_obj.bollinger_lband()
+            data_ind['bb_width'] = (data_ind['bb_high'] - data_ind['bb_low']) / (data_ind['bb_mid'] + 1e-10)
+            self.log('Bollinger Bands calculated successfully')
             
             self.log('Calculating ATR')
-            data_ind['atr'] = ta.volatility.average_true_range(
+            atr_obj = ta.volatility.AverageTrueRange(
                 data_ind['high'], data_ind['low'], data_ind['close'], window=14
             )
+            data_ind['atr'] = atr_obj.average_true_range()
+            self.log('ATR calculated successfully')
             
             self.log('Calculating Moving Averages')
             data_ind['sma_10'] = ta.trend.sma_indicator(data_ind['close'], window=10)
@@ -156,28 +162,35 @@ class V9TrainingPipeline:
             data_ind['sma_50'] = ta.trend.sma_indicator(data_ind['close'], window=50)
             data_ind['ema_12'] = ta.trend.ema_indicator(data_ind['close'], window=12)
             data_ind['ema_26'] = ta.trend.ema_indicator(data_ind['close'], window=26)
+            self.log('Moving averages calculated successfully')
             
             self.log('Calculating Volume indicators')
             data_ind['volume_ma'] = data_ind['volume'].rolling(window=20).mean()
-            data_ind['volume_ratio'] = data_ind['volume'] / data_ind['volume_ma']
+            data_ind['volume_ratio'] = data_ind['volume'] / (data_ind['volume_ma'] + 1e-10)
+            self.log('Volume indicators calculated successfully')
             
             self.log('Calculating Price-based features')
             data_ind['returns'] = data_ind['close'].pct_change()
-            data_ind['log_returns'] = np.log(data_ind['close'] / data_ind['close'].shift(1))
-            data_ind['price_range'] = (data_ind['high'] - data_ind['low']) / data_ind['close']
+            data_ind['log_returns'] = np.log(data_ind['close'] / (data_ind['close'].shift(1) + 1e-10) + 1e-10)
+            data_ind['price_range'] = (data_ind['high'] - data_ind['low']) / (data_ind['close'] + 1e-10)
             data_ind['price_momentum'] = data_ind['close'] - data_ind['close'].shift(5)
-            data_ind['high_low_ratio'] = data_ind['high'] / data_ind['low']
+            data_ind['high_low_ratio'] = data_ind['high'] / (data_ind['low'] + 1e-10)
+            self.log('Price features calculated successfully')
             
             self.log('Filling NaN values')
             data_ind = data_ind.fillna(method='bfill').fillna(method='ffill')
             
             total_features = len([c for c in data_ind.columns if c not in ['open_time']])
             self.log(f'Total technical features: {total_features}')
+            self.log(f'Data shape after features: {data_ind.shape}')
             
             return data_ind
             
         except Exception as e:
-            self.log(f'Error in indicator calculation: {e}', level='ERROR')
+            self.log(f'Error in indicator calculation: {str(e)}', level='ERROR')
+            self.log(f'Error type: {type(e).__name__}', level='ERROR')
+            import traceback
+            self.log(f'Traceback: {traceback.format_exc()}', level='ERROR')
             raise
 
     def step_4_prepare_sequences(self, data, sequence_length=60):
@@ -188,16 +201,20 @@ class V9TrainingPipeline:
         self.log(f'Sequence length: {sequence_length} timesteps')
         
         feature_cols = [c for c in data.columns 
-                       if c not in ['open_time', 'open', 'high', 'low', 'close', 'volume']]
+                       if c not in ['open_time', 'open', 'high', 'low', 'close', 'volume', 'close_time']]
         feature_cols += ['open', 'high', 'low', 'close', 'volume']
+        
+        self.log(f'Selected features: {len(feature_cols)}')
+        self.log(f'Feature list: {feature_cols}')
         
         X = data[feature_cols].values
         y_price = data['close'].values
         y_direction = (data['close'].shift(-1) > data['close']).astype(float).values
-        y_volatility = data['atr'].values / data['close'].values
+        y_volatility = (data['atr'].values + 1e-10) / (data['close'].values + 1e-10)
         
         self.log(f'Feature matrix shape: {X.shape}')
         self.log(f'Total features: {len(feature_cols)}')
+        self.log(f'Feature value range: [{X.min():.6f}, {X.max():.6f}]')
         
         def create_sequences(data, targets, seq_len):
             X_seq, y_seq = [], []
@@ -213,6 +230,9 @@ class V9TrainingPipeline:
         
         self.log(f'Generated {len(X_seq)} sequences')
         self.log(f'Sequence shape: {X_seq.shape}')
+        self.log(f'Price target shape: {y_price_seq.shape}')
+        self.log(f'Direction target shape: {y_direction_seq.shape}')
+        self.log(f'Volatility target shape: {y_volatility_seq.shape}')
         
         self.log('Normalizing sequences...')
         X_seq_flat = X_seq.reshape(-1, X_seq.shape[-1])
@@ -220,6 +240,7 @@ class V9TrainingPipeline:
         X_seq_norm = X_seq_norm_flat.reshape(X_seq.shape)
         
         self.log(f'Normalized sequence range: [{X_seq_norm.min():.4f}, {X_seq_norm.max():.4f}]')
+        self.log(f'Normalized mean: {X_seq_norm.mean():.4f}, std: {X_seq_norm.std():.4f}')
         
         return X_seq_norm, y_price_seq, y_direction_seq, y_volatility_seq
 
@@ -253,6 +274,8 @@ class V9TrainingPipeline:
         y_vol_val = y_volatility[train_idx:val_idx]
         y_vol_test = y_volatility[val_idx:]
         
+        self.log(f'Direction label distribution - Train: UP={y_dir_train.sum():.0f}/{len(y_dir_train)}, DOWN={len(y_dir_train)-y_dir_train.sum():.0f}/{len(y_dir_train)}')
+        
         return (X_train, X_val, X_test, 
                 y_price_train, y_price_val, y_price_test,
                 y_dir_train, y_dir_val, y_dir_test,
@@ -260,6 +283,7 @@ class V9TrainingPipeline:
 
     def build_direction_model(self, input_shape):
         self.log('Building direction model architecture')
+        self.log(f'Input shape: {input_shape}')
         
         inputs = layers.Input(shape=input_shape)
         
@@ -293,10 +317,12 @@ class V9TrainingPipeline:
         )
         
         self.log('Direction model compiled')
+        model.summary()
         return model
 
     def build_price_model(self, input_shape):
         self.log('Building price model architecture')
+        self.log(f'Input shape: {input_shape}')
         
         inputs = layers.Input(shape=input_shape)
         
@@ -327,6 +353,7 @@ class V9TrainingPipeline:
         )
         
         self.log('Price model compiled')
+        model.summary()
         return model
 
     def step_6_train_direction_model(self, X_train, X_val, X_test, 
@@ -402,6 +429,7 @@ class V9TrainingPipeline:
         X_test_2d = X_test.reshape(X_test.shape[0], -1)
         
         self.log(f'Flattened shape: {X_train_2d.shape}')
+        self.log(f'Volatility target range: [{y_vol_train.min():.8f}, {y_vol_train.max():.8f}]')
         
         model = xgb.XGBRegressor(
             n_estimators=300,
@@ -464,6 +492,7 @@ class V9TrainingPipeline:
         self.log('Starting price model training')
         self.log(f'Input shape: {input_shape}')
         self.log(f'Training samples: {len(X_train)}')
+        self.log(f'Price target range: [{y_price_train.min():.2f}, {y_price_train.max():.2f}]')
         
         callbacks = [
             EarlyStopping(monitor='val_loss', patience=25, restore_best_weights=True),
@@ -555,7 +584,9 @@ class V9TrainingPipeline:
             print()
             
         except Exception as e:
-            self.log(f'Pipeline failed: {e}', level='ERROR')
+            self.log(f'Pipeline failed: {str(e)}', level='ERROR')
+            import traceback
+            self.log(f'Full traceback: {traceback.format_exc()}', level='ERROR')
             raise
 
 if __name__ == '__main__':
