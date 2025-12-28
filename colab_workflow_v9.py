@@ -265,16 +265,21 @@ def main():
     
     # Fix: snapshot_download allow_patterns is tricky.
     # We download all json/csv files to be safe, then filter locally.
+    # Force ignore_patterns=None to avoid any default ignores
     path = snapshot_download(
         repo_id="zongowo111/cpb-models", 
         repo_type="dataset",
-        allow_patterns=["**/*.csv", "**/*.json"]
+        allow_patterns=None,
+        ignore_patterns=None
     )
     
     # Recursive search for the CSV file
     csv_file = None
+    all_files_found = []
+    
     for root, _, files in os.walk(path):
         for f in files:
+            all_files_found.append(f)
             if f.endswith(".csv") and args.symbol in f and args.interval in f:
                 csv_file = os.path.join(root, f)
                 break
@@ -282,9 +287,7 @@ def main():
             break
             
     if not csv_file:
-        # Fallback: list all CSVs found to help debug
-        all_csvs = [f for r,_,fs in os.walk(path) for f in fs if f.endswith(".csv")]
-        print(f"DEBUG: Found CSVs: {all_csvs}")
+        print(f"DEBUG: Found {len(all_files_found)} files in {path}. First 20: {all_files_found[:20]}")
         raise ValueError(f"No CSV found for {args.symbol} {args.interval} in {path}")
         
     _print_kv("csv", csv_file)
