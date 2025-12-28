@@ -347,16 +347,16 @@ def build_v9_model(seq_len: int, n_features: int, pred_len: int, lr: float) -> "
     x = layers.Conv1D(64, 3, padding="same", activation="swish")(inputs)
     x = layers.Conv1D(64, 3, padding="same", activation="swish")(x)
 
-    x = layers.Bidirectional(layers.LSTM(96, return_sequences=True, dropout=0.15))(x)
+    x = layers.Bidirectional(layers.LSTM(96, return_sequences=True, dropout=0.1))(x)
 
     att = layers.MultiHeadAttention(num_heads=4, key_dim=32, dropout=0.1)(x, x)
     x = layers.Add()([x, att])
     x = layers.LayerNormalization()(x)
 
-    x = layers.Bidirectional(layers.LSTM(64, return_sequences=False, dropout=0.15))(x)
+    x = layers.Bidirectional(layers.LSTM(64, return_sequences=False, dropout=0.1))(x)
 
     x = layers.Dense(192, activation="swish")(x)
-    x = layers.Dropout(0.2)(x)
+    x = layers.Dropout(0.15)(x)
 
     price = layers.Dense(pred_len * 3, dtype="float32", name="price_dense")(x)
     price = layers.Reshape((pred_len, 3), name="price")(price)
@@ -383,7 +383,7 @@ def build_v9_model(seq_len: int, n_features: int, pred_len: int, lr: float) -> "
         dy_pred = y_pred[:, 1:, :] - y_pred[:, :-1, :]
         shape = tf.reduce_mean(tf.square(dy_true - dy_pred))
 
-        return base + 0.15 * shape
+        return base + 0.5 * shape
 
     def vol_loss(y_true, y_pred):
         return tf.reduce_mean(tf.square(y_true - y_pred))
@@ -396,7 +396,7 @@ def build_v9_model(seq_len: int, n_features: int, pred_len: int, lr: float) -> "
     model.compile(
         optimizer=opt,
         loss={"price": price_loss, "vol": vol_loss},
-        loss_weights={"price": 1.0, "vol": 0.25},
+        loss_weights={"price": 2.0, "vol": 0.5},
         metrics={"price": ["mae"], "vol": ["mae"]},
     )
 
@@ -423,7 +423,6 @@ class ValMAPECallback(tf.keras.callbacks.Callback):
         pred_len: int,
         max_batches: int = 20,
     ):
-        # Explicitly initialize base class (required for Keras < 2.16 and safe for newer)
         super().__init__()
         self.X_val = X_val
         self.y_price_val = y_price_val
