@@ -20,10 +20,10 @@ Workflow:
   5) (optional) upload the whole folder to HF (single upload_folder call)
 
 Colab (GPU) one-liner:
-!curl -s https://raw.githubusercontent.com/caizongxun/trainer/main/colab_workflow_v9.py | python
+!curl -s https://raw.githubusercontent.com/caizongxun/trainer/main/colab_workflow_v9.py | python3 -
 
 Typical single-symbol tuning run (no upload):
-!curl -s https://raw.githubusercontent.com/caizongxun/trainer/main/colab_workflow_v9.py | python -- \
+!curl -s https://raw.githubusercontent.com/caizongxun/trainer/main/colab_workflow_v9.py | python3 - \
   --symbol BTCUSDT --interval 15m --epochs 100 --time_budget_min 120 --upload 0
 
 Notes:
@@ -32,7 +32,6 @@ Notes:
   1) env HF_TOKEN
   2) CLI arg --hf_token
   3) interactive input()
-  getpass() is avoided because it may fail under `curl | python` in Colab.
 """
 
 import os
@@ -47,6 +46,8 @@ from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
+import tensorflow as tf
+from tensorflow.keras.callbacks import Callback
 
 
 def _print_step(step: str, msg: str) -> None:
@@ -62,16 +63,12 @@ def _safe_mkdir(path: str) -> None:
 
 
 def _set_seed(seed: int) -> None:
-    import tensorflow as tf
-
     os.environ["PYTHONHASHSEED"] = str(seed)
     np.random.seed(seed)
     tf.random.set_seed(seed)
 
 
 def _configure_tf(enable_xla: bool = True, enable_mixed_precision: bool = True) -> dict:
-    import tensorflow as tf
-
     info = {
         "tf_version": tf.__version__,
         "num_gpus": len(tf.config.list_physical_devices("GPU")),
@@ -344,7 +341,6 @@ def chronological_split_by_end_index(
 # ------------------------------
 
 def build_v9_model(seq_len: int, n_features: int, pred_len: int, lr: float) -> "object":
-    import tensorflow as tf
     from tensorflow.keras import layers, Model
 
     inputs = layers.Input(shape=(seq_len, n_features), name="x")
@@ -417,11 +413,8 @@ def _mape(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.mean(np.abs((a - b) / denom)))
 
 
-class ValMAPECallback:
-    """Compute validation MAPE on reconstructed close prices and inject into logs.
-
-    Must inherit tf.keras.callbacks.Callback; otherwise Keras will call set_model() and fail.
-    """
+class ValMAPECallback(Callback):
+    """Compute validation MAPE on reconstructed close prices and inject into logs."""
 
     def __init__(
         self,
@@ -431,10 +424,9 @@ class ValMAPECallback:
         pred_len: int,
         max_batches: int = 20,
     ):
-        import tensorflow as tf
-
-        super().__init__()
-        self.tf = tf
+        # Do NOT call super().__init__() with no args if using legacy Keras or certain TF versions
+        # Just manually set model to None (Keras will set it later via set_model)
+        self.model = None
         self.X_val = X_val
         self.y_price_val = y_price_val
         self.base_close_val = base_close_val
@@ -464,12 +456,9 @@ class ValMAPECallback:
         logs["val_mape_close"] = mape_close
 
 
-class TimeBudgetCallback:
+class TimeBudgetCallback(Callback):
     def __init__(self, deadline_ts: float):
-        import tensorflow as tf
-
-        super().__init__()
-        self.tf = tf
+        self.model = None
         self.deadline_ts = deadline_ts
 
     def on_batch_end(self, batch, logs=None):
@@ -478,8 +467,6 @@ class TimeBudgetCallback:
 
 
 def _as_tf_dataset(X: np.ndarray, y_price: np.ndarray, y_vol: np.ndarray, batch_size: int, shuffle: bool) -> "object":
-    import tensorflow as tf
-
     ds = tf.data.Dataset.from_tensor_slices((X, {"price": y_price, "vol": y_vol}))
     if shuffle:
         ds = ds.shuffle(min(len(X), 10000), reshuffle_each_iteration=True)
@@ -615,7 +602,6 @@ def _save_forecast_plots(
     plt.savefig(p2, dpi=160)
     plt.close(fig)
 
-    # Save numeric arrays for further custom plotting
     npz_path = os.path.join(plots_dir, f"{symbol}_{interval}_v9_val_pred_true_close.npz")
     np.savez_compressed(
         npz_path,
