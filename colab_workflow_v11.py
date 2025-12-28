@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
 """colab_workflow_v11.py
 
-V11 "Reversal Hunter" Trainer
+V11.5 "Reversal Hunter Enhanced" Trainer
 
 Objective:
-- Stop predicting continuous price.
-- Predict PROBABILITY of a "Pivot High" or "Pivot Low" occurring within the next horizon.
-- This acts as a signal generator for entries (Buy on high prob of Pivot Low, Sell on Pivot High).
-
-Target Logic (ZigZag-like):
-- A candle is a Pivot Low if it is the lowest point in a local window [t-L, t+R].
-- A candle is a Pivot High if it is the highest point in a local window [t-L, t+R].
-- We train a Classifier to output probability: [Prob_NoPivot, Prob_PivotHigh, Prob_PivotLow].
+- Detect high-probability Pivot Highs (Sell) and Pivot Lows (Buy).
+- Reduce false positives (noise) by:
+    1. Using Focal Loss to focus on hard examples (rare pivots) instead of easy non-pivots.
+    2. Adding volatility-aware features (VWAP, ATR, BB Width) to distinguish chops from reversals.
+    3. Increasing class weights for Pivot classes.
 
 Features:
-- Classic price/volume features.
-- Divergence proxies (RSI slope vs Price slope).
-- Volume Climax indicators (z-score of volume).
-- Bollinger Band proximity.
+- Classic: RSI, MACD, Volume Z-score.
+- New: VWAP distance, ATR ratio, Bollinger Band Width.
 
 Run on Colab:
 !curl -s https://raw.githubusercontent.com/caizongxun/trainer/main/colab_workflow_v11.py | python3 - \
@@ -61,7 +56,7 @@ def _configure_tf() -> None:
     except: pass
 
 # ------------------------------
-# Feature engineering (V11 Enhanced)
+# Feature engineering (V11.5 Enhanced)
 # ------------------------------
 
 def _wilder_rsi(close: pd.Series, period: int = 14) -> pd.Series:
@@ -73,11 +68,15 @@ def _wilder_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     rs = avg_gain / (avg_loss + 1e-12)
     return 100.0 - (100.0 / (1.0 + rs))
 
+def _calculate_vwap(df):
+    v = df['volume'].values
+    tp = (df['high'] + df['low'] + df['close']) / 3
+    return df.assign(vwap=(tp * v).cumsum() / v.cumsum())
+
 def add_features_v11(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     d = df.copy()
     d.columns = [c.strip().lower() for c in d.columns]
     
-    # Parse time
     time_col = next((c for c in ["open_time", "opentime", "timestamp", "time", "date"] if c in d.columns), None)
     if not time_col: raise ValueError("Missing time column")
     if pd.api.types.is_numeric_dtype(d[time_col]):
@@ -105,28 +104,43 @@ def add_features_v11(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     
     # 3. RSI & Divergence proxies
     d["rsi"] = _wilder_rsi(d["close"]) / 100.0
-    # Slope of price vs slope of RSI (simple divergence proxy)
     d["price_slope"] = d["close"].diff(5) / d["close"].shift(5)
     d["rsi_slope"] = d["rsi"].diff(5)
     
-    # 4. Bollinger Band Position (Reversal often happens at bands)
+    # 4. Bollinger Band Position & Width
     bb_mean = d["close"].rolling(20).mean()
     bb_std = d["close"].rolling(20).std()
-    d["bb_pos"] = (d["close"] - bb_mean) / (2 * bb_std + 1e-12) # >1 means above upper band
+    d["bb_pos"] = (d["close"] - bb_mean) / (2 * bb_std + 1e-12) 
+    d["bb_width"] = (4 * bb_std) / bb_mean
 
-    # 5. MACD Histogram (Momentum wane)
+    # 5. MACD Histogram
     ema12 = d["close"].ewm(span=12, adjust=False).mean()
     ema26 = d["close"].ewm(span=26, adjust=False).mean()
     macd = ema12 - ema26
     signal = macd.ewm(span=9, adjust=False).mean()
     d["macd_hist"] = macd - signal
 
+    # 6. VWAP Distance (Mean Reversion)
+    # Simple rolling VWAP for feature stability
+    tp = (d['high'] + d['low'] + d['close']) / 3
+    d['vwap_roll'] = (tp * d['volume']).rolling(24).sum() / d['volume'].rolling(24).sum()
+    d["vwap_dist"] = (d["close"] - d["vwap_roll"]) / d["vwap_roll"]
+
+    # 7. ATR (Volatility)
+    tr1 = d['high'] - d['low']
+    tr2 = (d['high'] - d['close'].shift()).abs()
+    tr3 = (d['low'] - d['close'].shift()).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    d['atr'] = tr.rolling(14).mean()
+    d['atr_ratio'] = d['atr'] / d['close']
+
     d = d.dropna().reset_index(drop=True)
     
     feature_cols = [
         "log_ret", "body", "upper_shadow", "lower_shadow",
         "vol_z", "rsi", "price_slope", "rsi_slope",
-        "bb_pos", "macd_hist"
+        "bb_pos", "bb_width", "macd_hist",
+        "vwap_dist", "atr_ratio"
     ]
     return d, feature_cols
 
@@ -145,32 +159,20 @@ def label_pivots(df: pd.DataFrame, left: int=5, right: int=5):
         window_highs = highs[i-left : i+right+1]
         window_lows = lows[i-left : i+right+1]
         
-        # Check Pivot High (Highest in window)
         if highs[i] == np.max(window_highs):
             labels[i] = 1
-        # Check Pivot Low (Lowest in window)
         elif lows[i] == np.min(window_lows):
             labels[i] = 2
             
     return labels
 
 def create_sequences_cls(df: pd.DataFrame, cols: list[str], labels: np.ndarray, seq_len: int, pred_horizon: int):
-    # We want to predict if a Pivot will occur in the *next* `pred_horizon` steps.
-    # Actually, simpler: Predict if the *next candle* (or near future) is the start of a reversal?
-    # Let's try: Predict if any candle in [t+1, t+pred_horizon] is a Pivot High or Low.
-    
     feat = df[cols].values.astype(np.float32)
     n = len(df)
     max_i = n - seq_len - pred_horizon
     
     X = np.zeros((max_i, seq_len, len(cols)), dtype=np.float32)
     y = np.zeros((max_i,), dtype=int) 
-    
-    # y encoding: 
-    # 0 = No pivot in near future
-    # 1 = Pivot High incoming
-    # 2 = Pivot Low incoming
-    # Note: If both happen, prioritize the first one or stronger one. Simple logic: first one.
     
     for i in range(max_i):
         X[i] = feat[i : i+seq_len]
@@ -185,7 +187,6 @@ def create_sequences_cls(df: pd.DataFrame, cols: list[str], labels: np.ndarray, 
         elif has_low and not has_high:
             y[i] = 2
         elif has_high and has_low:
-            # Find which comes first
             first_high = np.where(future_labels == 1)[0][0]
             first_low = np.where(future_labels == 2)[0][0]
             y[i] = 1 if first_high < first_low else 2
@@ -195,29 +196,50 @@ def create_sequences_cls(df: pd.DataFrame, cols: list[str], labels: np.ndarray, 
     return X, y, df["open_time"].values[seq_len+pred_horizon-1 : seq_len+pred_horizon-1+max_i]
 
 # ------------------------------
-# Model: 3-class Classifier
+# Model: Classifier with Focal Loss
 # ------------------------------
+
+def focal_loss(gamma=2.0, alpha=0.25):
+    def focal_loss_fixed(y_true, y_pred):
+        # y_true is sparse (0, 1, 2)
+        # y_pred is (N, 3) probabilities
+        
+        # Convert y_true to one-hot
+        y_true_one_hot = tf.one_hot(tf.cast(y_true, tf.int32), depth=3)
+        
+        # Clip to prevent NaN
+        epsilon = 1.e-7
+        y_pred = tf.clip_by_value(y_pred, epsilon, 1. - epsilon)
+        
+        # Cross entropy
+        cross_entropy = -y_true_one_hot * tf.math.log(y_pred)
+        
+        # Focal term: (1 - pt)^gamma
+        loss = alpha * tf.pow(1. - y_pred, gamma) * cross_entropy
+        
+        return tf.reduce_mean(tf.reduce_sum(loss, axis=1))
+    return focal_loss_fixed
 
 def build_model_v11(seq_len: int, n_feat: int, lr: float=1e-3):
     from tensorflow.keras import layers, Model
     
     inp = layers.Input(shape=(seq_len, n_feat))
     
-    x = layers.Conv1D(64, 3, activation="relu", padding="same")(inp)
+    x = layers.Conv1D(64, 3, activation="swish", padding="same")(inp)
     x = layers.MaxPooling1D(2)(x)
     
     x = layers.Bidirectional(layers.LSTM(64, return_sequences=False, dropout=0.3))(x)
     
-    x = layers.Dense(64, activation="relu")(x)
+    x = layers.Dense(64, activation="swish")(x)
     x = layers.Dropout(0.3)(x)
     
-    # Output: 3 classes (None, High, Low)
     out = layers.Dense(3, activation="softmax")(x)
     
-    model = Model(inp, out, name="v11_reversal_hunter")
+    model = Model(inp, out, name="v11.5_reversal_hunter_focal")
     
     opt = tf.keras.optimizers.AdamW(learning_rate=lr)
-    model.compile(optimizer=opt, loss="sparse_categorical_crossentropy", metrics=["accuracy"])
+    # Using focal loss to suppress "easy negatives" (Class 0)
+    model.compile(optimizer=opt, loss=focal_loss(), metrics=["accuracy"])
     return model
 
 # ------------------------------
@@ -229,8 +251,8 @@ def main():
     p.add_argument("--symbol", type=str, default="BTCUSDT")
     p.add_argument("--interval", type=str, default="15m")
     p.add_argument("--epochs", type=int, default=60)
-    p.add_argument("--seq_len", type=int, default=60) # Lookback
-    p.add_argument("--horizon", type=int, default=6)  # Lookahead for pivot (1.5h)
+    p.add_argument("--seq_len", type=int, default=60) 
+    p.add_argument("--horizon", type=int, default=6)  
     p.add_argument("--class_weight", type=int, default=1) 
     args = p.parse_args()
 
@@ -254,11 +276,10 @@ def main():
     df = pd.read_csv(csv_file)
     df, features = add_features_v11(df)
     
-    # Labeling Pivots (ZigZag logic)
-    # pivot window: left=5, right=5 means a local extrema over 11 candles
+    # Labeling Pivots
     raw_labels = label_pivots(df, left=8, right=8) 
     
-    # Create dataset
+    # Dataset
     train_size = int(len(df) * 0.9)
     scaler = StandardScaler()
     df.loc[:train_size-1, features] = scaler.fit_transform(df.loc[:train_size-1, features])
@@ -267,15 +288,10 @@ def main():
     X, y, t_arr = create_sequences_cls(df, features, raw_labels, args.seq_len, args.horizon)
     
     # Split
-    # We must cut based on time, not random shuffle
     split_idx = int(len(X) * 0.9)
     X_train, y_train = X[:split_idx], y[:split_idx]
     X_val, y_val = X[split_idx:], y[split_idx:]
-    t_val = t_arr[split_idx:]
     
-    # Class weights? Pivots are rare.
-    # 0: ~90%, 1: ~5%, 2: ~5%
-    # Lets compute simple weights
     from sklearn.utils import class_weight
     if args.class_weight:
         cw = class_weight.compute_class_weight('balanced', classes=np.unique(y_train), y=y_train)
@@ -284,7 +300,7 @@ def main():
     else:
         cw_dict = None
 
-    _print_step("3/4", "Train V11")
+    _print_step("3/4", "Train V11.5")
     model = build_model_v11(args.seq_len, len(features), lr=1e-3)
     
     cb = [
@@ -307,42 +323,26 @@ def main():
     _safe_mkdir(os.path.join(out_dir, "plots"))
     model.save(os.path.join(out_dir, f"{args.symbol}_{args.interval}_v11_reversal.keras"))
     
-    # Visualize Signals
-    probs = model.predict(X_val, verbose=0) # (N, 3)
+    # Plot
+    probs = model.predict(X_val, verbose=0)
     pred_cls = np.argmax(probs, axis=1)
     
-    # Plot last 500 candles of validation
     import matplotlib.pyplot as plt
-    
-    # recover price for plotting (we need close price corresponding to t_val)
-    # t_val contains datetime, let's map back to df
-    # naive approach: just take the tail of df that matches validation length
     val_df = df.iloc[-len(y_val):].copy().reset_index(drop=True)
     price = val_df["close"].values
     
     plt.figure(figsize=(14, 6))
     plt.plot(price, color="gray", alpha=0.5, label="Price")
     
-    # Plot Buy Signals (Pred Class 2 = Pivot Low incoming)
     buy_idx = np.where(pred_cls == 2)[0]
     if len(buy_idx) > 0:
-        plt.scatter(buy_idx, price[buy_idx], color="green", marker="^", s=30, label="Pred Buy (Pivot Low)")
+        plt.scatter(buy_idx, price[buy_idx], color="green", marker="^", s=30, label="Pred Buy")
         
-    # Plot Sell Signals (Pred Class 1 = Pivot High incoming)
     sell_idx = np.where(pred_cls == 1)[0]
     if len(sell_idx) > 0:
-        plt.scatter(sell_idx, price[sell_idx], color="red", marker="v", s=30, label="Pred Sell (Pivot High)")
+        plt.scatter(sell_idx, price[sell_idx], color="red", marker="v", s=30, label="Pred Sell")
 
-    # Plot True Pivots for comparison (optional, but good for debug)
-    # We need to re-extract true labels for this segment
-    # y_val is the ground truth
-    true_buys = np.where(y_val == 2)[0]
-    true_sells = np.where(y_val == 1)[0]
-    
-    plt.scatter(true_buys, price[true_buys], color="lime", marker="x", s=15, alpha=0.5, label="True Low")
-    plt.scatter(true_sells, price[true_sells], color="magenta", marker="x", s=15, alpha=0.5, label="True High")
-
-    plt.title(f"V11 Reversal Hunter: {args.symbol} {args.interval}")
+    plt.title(f"V11.5 Reversal Hunter (Focal Loss): {args.symbol} {args.interval}")
     plt.legend()
     plt.tight_layout()
     plt.savefig(os.path.join(out_dir, "plots", "reversal_signals.png"))
