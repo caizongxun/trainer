@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import subprocess, sys, os
+import subprocess, sys
 print('[SETUP] Installing packages...')
 for pkg in ['tensorflow>=2.13.0', 'xgboost>=2.0.0', 'datasets>=2.14.0', 'ta>=0.10.2', 'scikit-learn']:
     subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', pkg])
@@ -18,7 +18,7 @@ from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCh
 from tensorflow.keras.regularizers import l2
 import xgboost as xgb
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_squared_error, mean_absolute_error, mean_absolute_percentage_error, r2_score, accuracy_score, f1_score, roc_auc_score
+from sklearn.metrics import mean_squared_error, mean_absolute_percentage_error, r2_score
 import ta
 from datasets import load_dataset
 
@@ -32,14 +32,14 @@ class Pipeline:
         self.results = {}
     
     def step1(self):
-        print('\n' + '='*80 + '\n[STEP 1/7] LOAD\n' + '='*80)
+        print('\n' + '='*80 + '\n[STEP 1/6] LOAD\n' + '='*80)
         dataset = load_dataset('zongowo111/cpb-models', data_files='klines_binance_us/BTCUSDT/BTCUSDT_1h_binance_us.csv')
         df = pd.DataFrame(dataset['train'])
         print(f'[INFO] Loaded {len(df)} candles')
         return df
     
     def step2(self, df):
-        print('\n' + '='*80 + '\n[STEP 2/7] PREPROCESS\n' + '='*80)
+        print('\n' + '='*80 + '\n[STEP 2/6] PREPROCESS\n' + '='*80)
         data = df.copy()
         for col in ['open', 'high', 'low', 'close', 'volume']:
             data[col] = pd.to_numeric(data[col], errors='coerce')
@@ -48,7 +48,7 @@ class Pipeline:
         return data
     
     def step3(self, data):
-        print('\n' + '='*80 + '\n[STEP 3/7] INDICATORS\n' + '='*80)
+        print('\n' + '='*80 + '\n[STEP 3/6] INDICATORS\n' + '='*80)
         d = data.copy()
         
         def safe_rsi(s, w):
@@ -109,12 +109,11 @@ class Pipeline:
         return d
     
     def step4(self, data, seq_len=60, future_steps=10):
-        print('\n' + '='*80 + '\n[STEP 4/7] SEQUENCES\n' + '='*80)
+        print('\n' + '='*80 + '\n[STEP 4/6] SEQUENCES\n' + '='*80)
         fc = [c for c in data.columns if c not in ['open_time', 'open', 'high', 'low', 'close', 'volume', 'close_time']]
         fc += ['open', 'high', 'low', 'close', 'volume']
         X = data[fc].values
         yp = data['close'].values
-        yd = (data['close'].shift(-1) > data['close']).astype(float).values
         yv = (data['atr'].values + 1e-10) / (data['close'].values + 1e-10)
         
         def cs(d, t, sl, fs=1):
@@ -126,41 +125,21 @@ class Pipeline:
         
         print(f'[INFO] Creating sequences (future_steps={future_steps})')
         Xs, yps = cs(X, yp, seq_len, future_steps)
-        _, yds = cs(X, yd, seq_len, future_steps)
         _, yvs = cs(X, yv, seq_len, future_steps)
         print(f'[INFO] Generated {len(Xs)} sequences')
         print('[INFO] Normalizing')
         Xsf = Xs.reshape(-1, Xs.shape[-1])
         Xsn = self.scaler.fit_transform(Xsf)
         Xs = Xsn.reshape(Xs.shape)
-        return Xs, yps, yds, yvs
+        return Xs, yps, yvs
     
-    def step5(self, X, yp, yd, yv):
-        print('\n' + '='*80 + '\n[STEP 5/7] SPLIT\n' + '='*80)
+    def step5(self, X, yp, yv):
+        print('\n' + '='*80 + '\n[STEP 5/6] SPLIT\n' + '='*80)
         n = len(X)
         tr = int(n * 0.7)
         va = int(n * 0.85)
         print(f'[INFO] Train: {tr}, Val: {va-tr}, Test: {n-va}')
-        return (X[:tr], X[tr:va], X[va:], yp[:tr], yp[tr:va], yp[va:], yd[:tr], yd[tr:va], yd[va:], yv[:tr], yv[tr:va], yv[va:])
-    
-    def build_dir(self, shape):
-        inp = layers.Input(shape=shape)
-        x = layers.Bidirectional(layers.LSTM(128, return_sequences=True, kernel_regularizer=l2(0.0001)))(inp)
-        x = layers.Dropout(0.3)(x)
-        x = layers.Bidirectional(layers.LSTM(64, return_sequences=True, kernel_regularizer=l2(0.0001)))(x)
-        x = layers.Dropout(0.3)(x)
-        att = layers.MultiHeadAttention(num_heads=4, key_dim=64)(x, x)
-        x = layers.Add()([x, att])
-        x = layers.LayerNormalization()(x)
-        x = layers.GlobalAveragePooling1D()(x)
-        x = layers.Dense(128, activation='relu')(x)
-        x = layers.Dropout(0.3)(x)
-        x = layers.Dense(64, activation='relu')(x)
-        x = layers.Dropout(0.3)(x)
-        out = layers.Dense(1, activation='sigmoid')(x)
-        m = models.Model(inp, out)
-        m.compile(optimizer=Adam(0.001), loss='binary_crossentropy', metrics=['accuracy', tf.keras.metrics.AUC()])
-        return m
+        return (X[:tr], X[tr:va], X[va:], yp[:tr], yp[tr:va], yp[va:], yv[:tr], yv[tr:va], yv[va:])
     
     def build_price(self, shape):
         inp = layers.Input(shape=shape)
@@ -181,25 +160,8 @@ class Pipeline:
         m.compile(optimizer=Adam(0.0005), loss='mse', metrics=['mae'])
         return m
     
-    def step6a(self, Xt, Xv, Xte, ydt, ydv, ydte):
-        print('\n' + '='*80 + '\n[STEP 6a/7] DIRECTION (next candle)\n' + '='*80)
-        m = self.build_dir((Xt.shape[1], Xt.shape[2]))
-        cbs = [EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True),
-               ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=10, min_lr=1e-6),
-               ModelCheckpoint('direction_best.h5', monitor='val_loss', save_best_only=True)]
-        m.fit(Xt, ydt, validation_data=(Xv, ydv), epochs=100, batch_size=32, callbacks=cbs, verbose=1)
-        yp = m.predict(Xte, verbose=0)
-        ypb = (yp > 0.5).astype(int).flatten()
-        ydteb = ydte.astype(int).flatten()
-        acc = accuracy_score(ydteb, ypb)
-        f1 = f1_score(ydteb, ypb, zero_division=0)
-        auc = roc_auc_score(ydteb, yp)
-        print(f'[INFO] Acc: {acc:.4f}, F1: {f1:.4f}, AUC: {auc:.4f}')
-        m.save('direction_model_v9.h5')
-        self.results['direction'] = {'accuracy': float(acc), 'f1': float(f1), 'auc': float(auc)}
-    
-    def step6b(self, Xt, Xv, Xte, yvt, yvv, yvte):
-        print('\n' + '='*80 + '\n[STEP 6b/7] VOLATILITY\n' + '='*80)
+    def step6a(self, Xt, Xv, Xte, yvt, yvv, yvte):
+        print('\n' + '='*80 + '\n[STEP 6a/6] VOLATILITY\n' + '='*80)
         Xt2 = Xt.reshape(Xt.shape[0], -1)
         Xte2 = Xte.reshape(Xte.shape[0], -1)
         m = xgb.XGBRegressor(n_estimators=100, max_depth=5, learning_rate=0.1, random_state=42, verbosity=0)
@@ -213,8 +175,8 @@ class Pipeline:
         m.save_model('volatility_model_v9.json')
         self.results['volatility'] = {'rmse': float(rmse), 'mape': float(mape), 'r2': float(r2)}
     
-    def step6c(self, Xt, Xv, Xte, ypt, ypv, ypte):
-        print('\n' + '='*80 + '\n[STEP 6c/7] PRICE (10 candles ahead)\n' + '='*80)
+    def step6b(self, Xt, Xv, Xte, ypt, ypv, ypte):
+        print('\n' + '='*80 + '\n[STEP 6b/6] PRICE (10 candles ahead)\n' + '='*80)
         m = self.build_price((Xt.shape[1], Xt.shape[2]))
         cbs = [EarlyStopping(monitor='val_loss', patience=25, restore_best_weights=True),
                ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=15, min_lr=1e-7),
@@ -229,8 +191,8 @@ class Pipeline:
         self.results['price'] = {'rmse': float(rmse), 'mape': float(mape), 'r2': float(r2), 'future_steps': 10}
     
     def step7(self):
-        print('\n' + '='*80 + '\n[STEP 7/7] SAVE\n' + '='*80)
-        rd = {'timestamp': datetime.now().isoformat(), 'pair': 'BTCUSDT', 'timeframe': '1h', 'version': 'v9', 'models': self.results}
+        print('\n' + '='*80 + '\n[STEP 7/6] SAVE\n' + '='*80)
+        rd = {'timestamp': datetime.now().isoformat(), 'pair': 'BTCUSDT', 'timeframe': '1h', 'version': 'v9', 'models': self.results, 'note': 'Direction derived from Price_t+10 vs Price_current'}
         with open('v9_results.json', 'w') as f:
             json.dump(rd, f, indent=2)
         print('[INFO] Results saved')
@@ -239,11 +201,10 @@ class Pipeline:
         df = self.step1()
         df = self.step2(df)
         df = self.step3(df)
-        X, yp, yd, yv = self.step4(df, seq_len=60, future_steps=10)
-        Xt, Xv, Xte, ypt, ypv, ypte, ydt, ydv, ydte, yvt, yvv, yvte = self.step5(X, yp, yd, yv)
-        self.step6a(Xt, Xv, Xte, ydt, ydv, ydte)
-        self.step6b(Xt, Xv, Xte, yvt, yvv, yvte)
-        self.step6c(Xt, Xv, Xte, ypt, ypv, ypte)
+        X, yp, yv = self.step4(df, seq_len=60, future_steps=10)
+        Xt, Xv, Xte, ypt, ypv, ypte, yvt, yvv, yvte = self.step5(X, yp, yv)
+        self.step6a(Xt, Xv, Xte, yvt, yvv, yvte)
+        self.step6b(Xt, Xv, Xte, ypt, ypv, ypte)
         self.step7()
         print('\n' + '='*80)
         print('V9 TRAINING COMPLETED')
