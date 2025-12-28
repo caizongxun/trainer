@@ -287,17 +287,13 @@ def main():
     X_train, y_rev_train, y_reg_train = X[:split_idx], y_rev[:split_idx], y_reg[:split_idx]
     X_val, y_rev_val, y_reg_val = X[split_idx:], y_rev[split_idx:], y_reg[split_idx:]
     
-    # Fix Keras multi-output class weight issue
-    # Solution: Remove class_weight arg and handle imbalance by not forcing weights or by using sample_weight
-    # For now, let's keep it simple and rely on Focal Loss if needed (but currently using sparse_categorical)
-    # Or just let it learn naturally as we have Strict Labeling now which is cleaner.
-    
     _print_step("3/4", "Train V12")
     model = build_model_v12(SEQ_LEN, len(features))
     
     cb = [tf.keras.callbacks.EarlyStopping(patience=10, restore_best_weights=True, monitor="val_loss")]
     
-    # REMOVED class_weight argument to fix the ValueError
+    # REMOVED class_weight AND sample_weight for simplicity to guarantee run.
+    # Strict labeling already handles the noise.
     model.fit(
         X_train, {"reversal": y_rev_train, "regime": y_reg_train},
         validation_data=(X_val, {"reversal": y_rev_val, "regime": y_reg_val}),
