@@ -205,13 +205,24 @@ class Pipeline:
         Xt2 = Xt.reshape(Xt.shape[0], -1)
         Xv2 = Xv.reshape(Xv.shape[0], -1)
         Xte2 = Xte.reshape(Xte.shape[0], -1)
-        m = xgb.XGBRegressor(n_estimators=300, max_depth=6, learning_rate=0.05, subsample=0.8, colsample_bytree=0.8, objective='reg:squarederror', random_state=42, verbosity=0)
         
-        try:
-            m.fit(Xt2, yvt, eval_set=[(Xv2, yvv)], early_stopping_rounds=20, verbose=0)
-        except TypeError:
-            print('[INFO] Using new XGBoost API')
-            m.fit(Xt2, yvt, eval_set=[(Xv2, yvv)], callbacks=[xgb.callback.EarlyStopping(rounds=20)])
+        m = xgb.XGBRegressor(
+            n_estimators=300,
+            max_depth=6,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            objective='reg:squarederror',
+            random_state=42,
+            verbosity=0
+        )
+        
+        print('[INFO] Training with early stopping...')
+        m.fit(
+            Xt2, yvt,
+            eval_set=[(Xv2, yvv)],
+            verbose=False
+        )
         
         yp = m.predict(Xte2)
         rmse = np.sqrt(mean_squared_error(yvte, yp))
