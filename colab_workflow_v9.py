@@ -3,32 +3,32 @@
 
 V9 Multi-Horizon (30 -> 10) Crypto Kline Forecast Trainer
 
-Design goals (per user requirements):
+Key goals:
 - Use last 30 candles to predict next 10 candles (multi-output / MIMO)
-- More price-related features (returns, ranges, candle anatomy, rolling vol, trend)
-- Explicit volatility learning via an auxiliary volatility head
-- Avoid the classic drift issue (later horizons collapse to monotonic trend) via:
-  - Direct multi-horizon prediction (no recursive feeding)
-  - Horizon-weighted loss (later steps weighted higher)
-  - Shape loss on first-differences across the forecast horizon
-- GPU training on Colab with mixed precision + XLA when available
-- End-to-end workflow:
+- Price-heavy feature set
+- Auxiliary volatility head to learn volatility magnitude
+- Reduce multi-step drift via:
+  - direct multi-horizon prediction (no recursive feeding)
+  - horizon-weighted loss (later steps weighted higher)
+  - shape loss on first-differences across the forecast horizon
+
+Workflow:
   1) env setup
   2) fetch data from HF dataset zongowo111/cpb-models (klines_binance_us)
   3) train (epochs up to 100 with early stopping + time budget)
   4) save to ./all_models/models_v9/
-  5) upload the whole folder to HF (single upload_folder call)
+  5) (optional) upload the whole folder to HF (single upload_folder call)
 
-Run in Colab:
+Colab (GPU) one-liner:
 !curl -s https://raw.githubusercontent.com/caizongxun/trainer/main/colab_workflow_v9.py | python
 
-Optional args:
-  --seq_len 30 --pred_len 10 --epochs 100 --time_budget_min 120
-  --intervals 1h,15m --max_models 0
+Typical single-symbol tuning run (no upload):
+!curl -s https://raw.githubusercontent.com/caizongxun/trainer/main/colab_workflow_v9.py | python -- \
+  --symbol BTCUSDT --interval 15m --epochs 100 --time_budget_min 120 --upload 0
 
 Notes:
-- This script does NOT print emojis.
-- HuggingFace upload token is read from:
+- No emojis.
+- HuggingFace token is read from:
   1) env HF_TOKEN
   2) CLI arg --hf_token
   3) interactive input()
@@ -277,8 +277,8 @@ def create_multihorizon_sequences(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     feat = df_feat[feature_cols].values.astype(np.float32)
     close = df_feat["close"].values.astype(np.float32)
-    high = df_feat["high"] .values.astype(np.float32)
-    low = df_feat["low"] .values.astype(np.float32)
+    high = df_feat["high"].values.astype(np.float32)
+    low = df_feat["low"].values.astype(np.float32)
 
     n = len(df_feat)
     max_i = n - seq_len - pred_len
@@ -418,6 +418,11 @@ def _mape(a: np.ndarray, b: np.ndarray) -> float:
 
 
 class ValMAPECallback:
+    """Compute validation MAPE on reconstructed close prices and inject into logs.
+
+    Must inherit tf.keras.callbacks.Callback; otherwise Keras will call set_model() and fail.
+    """
+
     def __init__(
         self,
         X_val: np.ndarray,
@@ -426,6 +431,10 @@ class ValMAPECallback:
         pred_len: int,
         max_batches: int = 20,
     ):
+        import tensorflow as tf
+
+        super().__init__()
+        self.tf = tf
         self.X_val = X_val
         self.y_price_val = y_price_val
         self.base_close_val = base_close_val
@@ -457,6 +466,10 @@ class ValMAPECallback:
 
 class TimeBudgetCallback:
     def __init__(self, deadline_ts: float):
+        import tensorflow as tf
+
+        super().__init__()
+        self.tf = tf
         self.deadline_ts = deadline_ts
 
     def on_batch_end(self, batch, logs=None):
@@ -507,7 +520,6 @@ def hf_snapshot_download_klines(dataset_id: str, local_dir: str) -> list[str]:
 
 def parse_symbol_interval_from_filename(filename: str) -> tuple[str, str] | None:
     base = os.path.basename(filename)
-    # BTCUSDT_1h_binance_us.csv / BTCUSDT_15m_binance_us.csv
     m = re.match(r"^(?P<sym>[A-Z0-9]+)_(?P<intv>\d+[mhdw])", base)
     if m:
         return m.group("sym"), m.group("intv")
@@ -525,7 +537,6 @@ def load_csv(csv_path: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     df.columns = [c.strip().lower() for c in df.columns]
 
-    # Some csv may use uppercase OHLCV
     rename_map = {}
     for a in ["open", "high", "low", "close", "volume"]:
         if a not in df.columns and a.capitalize() in df.columns:
@@ -548,6 +559,73 @@ def upload_models_folder_to_hf(dataset_id: str, local_models_dir: str, repo_subd
     )
 
 
+def _save_forecast_plots(
+    out_dir: str,
+    symbol: str,
+    interval: str,
+    base_close_val: np.ndarray,
+    y_price_val: np.ndarray,
+    pred_price: np.ndarray,
+    pred_len: int,
+) -> dict:
+    """Save plots to out_dir/plots and return dict of paths."""
+
+    import matplotlib.pyplot as plt
+
+    plots_dir = os.path.join(out_dir, "plots")
+    _safe_mkdir(plots_dir)
+
+    true_close_all = _reconstruct_close_from_returns(base_close_val, y_price_val[:, :, 0])
+    pred_close_all = _reconstruct_close_from_returns(base_close_val, pred_price[:, :, 0])
+
+    # Plot A: single example trajectory (last val sample)
+    i = -1
+    steps = np.arange(1, pred_len + 1)
+    fig = plt.figure(figsize=(8, 4))
+    plt.plot(steps, true_close_all[i], label="true_close")
+    plt.plot(steps, pred_close_all[i], label="pred_close")
+    plt.title(f"{symbol} {interval} | 10-step trajectory (one val sample)")
+    plt.xlabel("horizon step")
+    plt.ylabel("price")
+    plt.legend()
+    p1 = os.path.join(plots_dir, f"{symbol}_{interval}_v9_forecast_example.png")
+    plt.tight_layout()
+    plt.savefig(p1, dpi=160)
+    plt.close(fig)
+
+    # Plot B: series comparison for horizon 1 and horizon pred_len across val set
+    h1 = 0
+    hN = pred_len - 1
+    t = np.arange(len(true_close_all))
+    fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+
+    axes[0].plot(t, true_close_all[:, h1], label="true_h1")
+    axes[0].plot(t, pred_close_all[:, h1], label="pred_h1")
+    axes[0].set_title(f"{symbol} {interval} | horizon=1 (next candle close)")
+    axes[0].legend()
+
+    axes[1].plot(t, true_close_all[:, hN], label=f"true_h{pred_len}")
+    axes[1].plot(t, pred_close_all[:, hN], label=f"pred_h{pred_len}")
+    axes[1].set_title(f"{symbol} {interval} | horizon={pred_len}")
+    axes[1].legend()
+
+    axes[1].set_xlabel("validation sample index (chronological)")
+    p2 = os.path.join(plots_dir, f"{symbol}_{interval}_v9_forecast_series_h1_h{pred_len}.png")
+    plt.tight_layout()
+    plt.savefig(p2, dpi=160)
+    plt.close(fig)
+
+    # Save numeric arrays for further custom plotting
+    npz_path = os.path.join(plots_dir, f"{symbol}_{interval}_v9_val_pred_true_close.npz")
+    np.savez_compressed(
+        npz_path,
+        true_close=true_close_all.astype(np.float32),
+        pred_close=pred_close_all.astype(np.float32),
+    )
+
+    return {"plot_example": p1, "plot_series": p2, "npz": npz_path}
+
+
 # ------------------------------
 # Main workflow
 # ------------------------------
@@ -565,7 +643,10 @@ class TrainConfig:
     time_budget_min: int = 120
     max_models: int = 0
     intervals: tuple[str, ...] = ("15m", "1h")
+    symbol: str = ""
+    interval: str = ""
     hf_token: str = ""
+    upload: int = 0
 
 
 def parse_args() -> TrainConfig:
@@ -581,7 +662,10 @@ def parse_args() -> TrainConfig:
     p.add_argument("--time_budget_min", type=int, default=120)
     p.add_argument("--max_models", type=int, default=0)
     p.add_argument("--intervals", type=str, default="15m,1h")
+    p.add_argument("--symbol", type=str, default="")
+    p.add_argument("--interval", type=str, default="")
     p.add_argument("--hf_token", type=str, default="")
+    p.add_argument("--upload", type=int, default=0)
 
     a = p.parse_args()
     intervals = tuple([s.strip() for s in a.intervals.split(",") if s.strip()])
@@ -598,7 +682,10 @@ def parse_args() -> TrainConfig:
         time_budget_min=a.time_budget_min,
         max_models=a.max_models,
         intervals=intervals,
+        symbol=(a.symbol or "").strip().upper(),
+        interval=(a.interval or "").strip(),
         hf_token=a.hf_token or "",
+        upload=int(a.upload),
     )
 
 
@@ -655,8 +742,13 @@ def main() -> int:
         if meta is None:
             continue
         sym, intv = meta
-        if intv in cfg.intervals:
-            pairs.append((sym, intv, pth))
+        if intv not in cfg.intervals:
+            continue
+        if cfg.symbol and sym != cfg.symbol:
+            continue
+        if cfg.interval and intv != cfg.interval:
+            continue
+        pairs.append((sym, intv, pth))
 
     pairs.sort(key=lambda x: (x[0], x[1]))
 
@@ -666,9 +758,13 @@ def main() -> int:
     _print_kv("csv_files_found", len(csv_paths))
     _print_kv("pairs_to_train", len(pairs))
     _print_kv("intervals", cfg.intervals)
+    if cfg.symbol:
+        _print_kv("symbol", cfg.symbol)
+    if cfg.interval:
+        _print_kv("interval", cfg.interval)
 
     if not pairs:
-        print("No training pairs found. Please verify dataset structure and --intervals.")
+        print("No training pairs found. Please verify dataset structure and filters.")
         return 1
 
     _print_step("4/7", "Training")
@@ -697,10 +793,8 @@ def main() -> int:
             if train_end_row <= 50:
                 raise ValueError(f"Train split too small: train_end_row={train_end_row}, rows={n_rows}")
 
-            # Ensure numeric dtype to avoid pandas assignment warnings
             df_feat.loc[:, feature_cols] = df_feat[feature_cols].astype(np.float32)
 
-            # Fit scaler on train rows only, then transform ALL rows (same shape)
             scaler = RobustScaler()
             scaler.fit(df_feat.loc[: train_end_row - 1, feature_cols].values)
             df_feat.loc[:, feature_cols] = scaler.transform(df_feat[feature_cols].values).astype(np.float32)
@@ -781,6 +875,16 @@ def main() -> int:
             true_close = _reconstruct_close_from_returns(base_close_val, y_price_val[:, :, 0])
             val_mape_close = _mape(true_close, pred_close)
 
+            plot_paths = _save_forecast_plots(
+                out_dir=out_dir,
+                symbol=symbol,
+                interval=interval,
+                base_close_val=base_close_val,
+                y_price_val=y_price_val,
+                pred_price=pred["price"],
+                pred_len=cfg.pred_len,
+            )
+
             meta_payload = {
                 "symbol": symbol,
                 "interval": interval,
@@ -797,6 +901,7 @@ def main() -> int:
                 "train_seconds": float(time.time() - model_start),
                 "final_model": os.path.basename(final_path),
                 "best_checkpoint": os.path.basename(ckpt_path),
+                "plots": plot_paths,
             }
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump(meta_payload, f, ensure_ascii=False, indent=2)
@@ -804,6 +909,8 @@ def main() -> int:
             print("Result")
             _print_kv("val_mape_close", f"{val_mape_close:.6f}")
             _print_kv("saved", final_path)
+            _print_kv("plot_example", plot_paths["plot_example"])
+            _print_kv("plot_series", plot_paths["plot_series"])
 
             training_results.append(meta_payload)
 
@@ -839,32 +946,33 @@ def main() -> int:
     _print_kv("summary_path", os.path.join(local_models_root, "training_summary_v9.json"))
 
     _print_step("6/7", "Upload models_v9 to HuggingFace (optional)")
-    print("If upload is not needed now, just press Enter when prompted and the script will skip upload.")
 
-    try:
-        token = (cfg.hf_token or "").strip()
-        if not token:
-            token = (os.environ.get("HF_TOKEN", "") or "").strip()
+    if cfg.upload != 1:
+        print("Upload disabled (use --upload 1 to enable).")
+    else:
+        print("If upload is not needed now, just press Enter when prompted and the script will skip upload.")
+        try:
+            token = (cfg.hf_token or "").strip()
+            if not token:
+                token = (os.environ.get("HF_TOKEN", "") or "").strip()
+            if not token:
+                try:
+                    token = input("Enter HuggingFace token (leave blank to skip upload): ").strip()
+                except EOFError:
+                    token = ""
 
-        if not token:
-            try:
-                token = input("Enter HuggingFace token (leave blank to skip upload): ").strip()
-            except EOFError:
-                token = ""
-
-        if token:
-            upload_models_folder_to_hf(
-                dataset_id=cfg.dataset_id,
-                local_models_dir=local_models_v9,
-                repo_subdir="models_v9",
-                token=token,
-            )
-            print("Upload completed.")
-        else:
-            print("Upload skipped.")
-
-    except Exception as e:
-        print(f"Upload failed: {type(e).__name__}: {e}")
+            if token:
+                upload_models_folder_to_hf(
+                    dataset_id=cfg.dataset_id,
+                    local_models_dir=local_models_v9,
+                    repo_subdir="models_v9",
+                    token=token,
+                )
+                print("Upload completed.")
+            else:
+                print("Upload skipped.")
+        except Exception as e:
+            print(f"Upload failed: {type(e).__name__}: {e}")
 
     _print_step("7/7", "Done")
     _print_kv("total_seconds", f"{time.time() - start_ts:.1f}")
