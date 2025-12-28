@@ -6,6 +6,7 @@ import pandas as pd
 import pandas_ta as ta
 import matplotlib.pyplot as plt
 import tensorflow as tf
+import urllib.request
 from sklearn.preprocessing import RobustScaler
 from tensorflow.keras.models import load_model
 from tensorflow.keras.losses import Huber
@@ -17,19 +18,37 @@ from tensorflow.keras.losses import Huber
 HF_DATASET_BASE = "https://huggingface.co/datasets/zongowo111/cpb-models/resolve/main"
 HF_SUBDIR = "klines_binance_us"
 
-def download_data(symbol: str, interval: str) -> pd.DataFrame:
-    import urllib.request
-    
-    url = f"{HF_DATASET_BASE}/{HF_SUBDIR}/klines/{symbol}/{symbol}_{interval}_binance_us.csv"
-    print(f"[DATA] Downloading: {url}")
-    
+def _try_read_csv(url: str, timeout_sec: int = 30) -> pd.DataFrame | None:
     try:
+        print(f"[DATA] Trying URL: {url}")
+        with urllib.request.urlopen(url, timeout=timeout_sec) as resp:
+            status = getattr(resp, "status", None)
+            if status is not None:
+                print(f"[DATA] HTTP status: {status}")
         df = pd.read_csv(url)
+        print(f"[DATA] Download OK: rows={len(df)}")
+        return df
     except Exception as e:
-        # Fallback
-        url_fallback = f"{HF_DATASET_BASE}/{HF_SUBDIR}/{symbol}/{symbol}_{interval}.csv"
-        print(f"[DATA] Primary failed, trying fallback: {url_fallback}")
-        df = pd.read_csv(url_fallback)
+        print(f"[DATA] Download failed: {type(e).__name__}: {e}")
+        return None
+
+def download_data(symbol: str, interval: str) -> pd.DataFrame:
+    candidates = [
+        # Correct path based on klines_summary_binance_us.json
+        f"{HF_DATASET_BASE}/{HF_SUBDIR}/klines/{symbol}/{symbol}_{interval}_binance_us.csv",
+        # Backward-compatible fallbacks
+        f"{HF_DATASET_BASE}/{HF_SUBDIR}/{symbol}/{symbol}_{interval}.csv",
+        f"{HF_DATASET_BASE}/{HF_SUBDIR}/{symbol}/{symbol}_{interval}_binance_us.csv",
+    ]
+
+    df = None
+    for url in candidates:
+        df = _try_read_csv(url)
+        if df is not None and len(df) > 0:
+            break
+
+    if df is None:
+        raise RuntimeError("All dataset URL candidates failed. Please verify dataset path and access.")
 
     # Normalize columns
     df.columns = [c.strip().lower() for c in df.columns]
