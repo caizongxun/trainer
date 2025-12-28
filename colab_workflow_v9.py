@@ -263,12 +263,12 @@ def main():
     _print_step("2/5", "Data")
     from huggingface_hub import snapshot_download
     
-    # Fix: Ensure we correctly fetch dataset by repo_type="dataset"
-    # Also handle file search more robustly
+    # Fix: snapshot_download allow_patterns is tricky.
+    # We download all json/csv files to be safe, then filter locally.
     path = snapshot_download(
         repo_id="zongowo111/cpb-models", 
         repo_type="dataset",
-        allow_patterns=f"**/{args.symbol}_{args.interval}_*.csv"
+        allow_patterns=["**/*.csv", "**/*.json"]
     )
     
     # Recursive search for the CSV file
@@ -282,6 +282,9 @@ def main():
             break
             
     if not csv_file:
+        # Fallback: list all CSVs found to help debug
+        all_csvs = [f for r,_,fs in os.walk(path) for f in fs if f.endswith(".csv")]
+        print(f"DEBUG: Found CSVs: {all_csvs}")
         raise ValueError(f"No CSV found for {args.symbol} {args.interval} in {path}")
         
     _print_kv("csv", csv_file)
