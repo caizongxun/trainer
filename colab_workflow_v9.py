@@ -27,20 +27,23 @@ Optional args:
   --intervals 1h,15m --max_models 0
 
 Notes:
-- This script does NOT print emojis (per Space instruction).
-- HuggingFace upload token is requested at the upload step via getpass.
+- This script does NOT print emojis.
+- HuggingFace upload token is read from:
+  1) env HF_TOKEN
+  2) CLI arg --hf_token
+  3) interactive input()
+  getpass() is avoided because it may fail under `curl | python` in Colab.
 """
 
 import os
 import re
-import sys
 import gc
 import json
 import time
 import math
 import argparse
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -114,7 +117,6 @@ def _wilder_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     gain = delta.clip(lower=0.0)
     loss = -delta.clip(upper=0.0)
 
-    # Wilder smoothing
     avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
 
@@ -143,13 +145,6 @@ def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
 
 
 def add_price_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
-    """Generate a feature set that is heavily price-focused and multi-horizon friendly.
-
-    Returns:
-      df_feat: DataFrame with engineered features
-      feature_cols: list of feature column names
-    """
-
     d = df.copy()
     d.columns = [c.strip().lower() for c in d.columns]
 
@@ -185,7 +180,7 @@ def add_price_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     d["log_ret_high"] = np.log(d["high"] / d["high"].shift(1))
     d["log_ret_low"] = np.log(d["low"] / d["low"].shift(1))
 
-    # Candle anatomy (relative to close)
+    # Candle anatomy
     oc_mid = (d["open"] + d["close"]) / 2.0
     d["hl_range"] = (d["high"] - d["low"]) / (d["close"] + 1e-12)
     d["oc_range"] = (d["close"] - d["open"]) / (d["open"] + 1e-12)
@@ -197,7 +192,7 @@ def add_price_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     d["log_vol"] = np.log(d["volume"] + 1.0)
     d["log_vol_chg"] = d["log_vol"].diff()
 
-    # Rolling stats on returns (volatility + momentum)
+    # Rolling stats on returns
     for w in [3, 5, 10]:
         d[f"ret_mean_{w}"] = d["log_ret_close"].rolling(w).mean()
         d[f"ret_std_{w}"] = d["log_ret_close"].rolling(w).std()
@@ -209,7 +204,7 @@ def add_price_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     # RSI
     d["rsi_14"] = _wilder_rsi(d["close"], period=14) / 100.0
 
-    # ATR (as relative volatility)
+    # ATR (relative)
     d["atr_14"] = _atr(d, period=14) / (d["close"] + 1e-12)
 
     # Bollinger (20)
@@ -220,7 +215,7 @@ def add_price_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     d["bb_width"] = (bb_up - bb_dn) / (bb_mid + 1e-12)
     d["bb_pos"] = (d["close"] - bb_dn) / ((bb_up - bb_dn) + 1e-12)
 
-    # Time features (sin/cos)
+    # Time features
     ot = d["open_time"]
     hour = ot.dt.hour.astype(np.float32)
     dow = ot.dt.dayofweek.astype(np.float32)
@@ -263,7 +258,6 @@ def add_price_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
         "dow_cos",
     ]
 
-    # Defensive: keep only existing columns
     feature_cols = [c for c in feature_cols if c in d.columns]
     if len(feature_cols) < 10:
         raise ValueError(f"Too few features generated: {len(feature_cols)}")
@@ -281,16 +275,10 @@ def create_multihorizon_sequences(
     seq_len: int,
     pred_len: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Return X, y_price, y_vol, base_close, end_index
-
-    y_price: (pred_len,3) -> log-return relative to base close, for (close,high,low)
-    y_vol:   (pred_len,1) -> log(range/base_close) where range = high-low
-    """
-
     feat = df_feat[feature_cols].values.astype(np.float32)
     close = df_feat["close"].values.astype(np.float32)
-    high = df_feat["high"].values.astype(np.float32)
-    low = df_feat["low"].values.astype(np.float32)
+    high = df_feat["high"] .values.astype(np.float32)
+    low = df_feat["low"] .values.astype(np.float32)
 
     n = len(df_feat)
     max_i = n - seq_len - pred_len
@@ -331,8 +319,6 @@ def chronological_split_by_end_index(
     end_index: np.ndarray,
     train_end_row: int,
 ) -> dict:
-    """Split sequences based on the time index of the last predicted step."""
-
     train_mask = end_index < train_end_row
     val_mask = ~train_mask
 
@@ -377,7 +363,6 @@ def build_v9_model(seq_len: int, n_features: int, pred_len: int, lr: float) -> "
     x = layers.Dense(192, activation="swish")(x)
     x = layers.Dropout(0.2)(x)
 
-    # Outputs in float32 (important under mixed precision)
     price = layers.Dense(pred_len * 3, dtype="float32", name="price_dense")(x)
     price = layers.Reshape((pred_len, 3), name="price")(price)
 
@@ -386,7 +371,6 @@ def build_v9_model(seq_len: int, n_features: int, pred_len: int, lr: float) -> "
 
     model = Model(inputs=inputs, outputs={"price": price, "vol": vol}, name="v9_multihorizon")
 
-    # Custom losses
     delta = 1.0
     horizon_w = tf.reshape(tf.linspace(1.0, float(pred_len), pred_len), (1, pred_len, 1))
     horizon_w = horizon_w / tf.reduce_mean(horizon_w)
@@ -396,11 +380,10 @@ def build_v9_model(seq_len: int, n_features: int, pred_len: int, lr: float) -> "
         abs_err = tf.abs(err)
         quad = tf.minimum(abs_err, delta)
         lin = abs_err - quad
-        huber = 0.5 * tf.square(quad) + delta * lin  # (B, pred_len, 3)
+        huber = 0.5 * tf.square(quad) + delta * lin
         huber_w = huber * horizon_w
         base = tf.reduce_mean(huber_w)
 
-        # Shape loss on first differences across horizon (helps reversals)
         dy_true = y_true[:, 1:, :] - y_true[:, :-1, :]
         dy_pred = y_pred[:, 1:, :] - y_pred[:, :-1, :]
         shape = tf.reduce_mean(tf.square(dy_true - dy_pred))
@@ -426,8 +409,6 @@ def build_v9_model(seq_len: int, n_features: int, pred_len: int, lr: float) -> "
 
 
 def _reconstruct_close_from_returns(base_close: np.ndarray, pred_logret_close: np.ndarray) -> np.ndarray:
-    # base_close: (N,)
-    # pred_logret_close: (N, pred_len)
     return base_close.reshape(-1, 1) * np.exp(pred_logret_close)
 
 
@@ -437,8 +418,6 @@ def _mape(a: np.ndarray, b: np.ndarray) -> float:
 
 
 class ValMAPECallback:
-    """Compute validation MAPE on reconstructed close prices and inject into logs."""
-
     def __init__(
         self,
         X_val: np.ndarray,
@@ -455,11 +434,7 @@ class ValMAPECallback:
         self.val_mape_close = None
 
     def on_epoch_end(self, epoch, logs=None):
-        import tensorflow as tf
-
         logs = logs or {}
-
-        # Sample subset to keep it fast
         n = len(self.X_val)
         if n <= 0:
             return
@@ -470,7 +445,7 @@ class ValMAPECallback:
         bs = self.base_close_val[-take:]
 
         pred = self.model.predict(Xs, verbose=0)
-        pred_price = pred["price"]  # (N,pred_len,3)
+        pred_price = pred["price"]
 
         true_close = _reconstruct_close_from_returns(bs, ys[:, :, 0])
         pred_close = _reconstruct_close_from_returns(bs, pred_price[:, :, 0])
@@ -504,7 +479,6 @@ def _as_tf_dataset(X: np.ndarray, y_price: np.ndarray, y_vol: np.ndarray, batch_
 # ------------------------------
 
 def hf_snapshot_download_klines(dataset_id: str, local_dir: str) -> list[str]:
-    """Download all klines csv files under klines_binance_us/ using one snapshot_download."""
     from huggingface_hub import snapshot_download
 
     allow = [
@@ -521,7 +495,6 @@ def hf_snapshot_download_klines(dataset_id: str, local_dir: str) -> list[str]:
         allow_patterns=allow,
     )
 
-    # Collect all csv files
     csvs = []
     for root, _, files in os.walk(path):
         for fn in files:
@@ -534,10 +507,8 @@ def hf_snapshot_download_klines(dataset_id: str, local_dir: str) -> list[str]:
 
 def parse_symbol_interval_from_filename(filename: str) -> tuple[str, str] | None:
     base = os.path.basename(filename)
-    # Common patterns:
-    # BTCUSDT_1h_binance_us.csv
-    # BTCUSDT_15m.csv
-    m = re.match(r"^(?P<sym>[A-Z0-9]+)_(?P<intv>[0-9]+[mhdw]|[0-9]+h)".replace("[0-9]+h", "[0-9]+h"), base)
+    # BTCUSDT_1h_binance_us.csv / BTCUSDT_15m_binance_us.csv
+    m = re.match(r"^(?P<sym>[A-Z0-9]+)_(?P<intv>\d+[mhdw])", base)
     if m:
         return m.group("sym"), m.group("intv")
 
@@ -556,7 +527,7 @@ def load_csv(csv_path: str) -> pd.DataFrame:
 
     # Some csv may use uppercase OHLCV
     rename_map = {}
-    for a, b in [("open", "open"), ("high", "high"), ("low", "low"), ("close", "close"), ("volume", "volume")]:
+    for a in ["open", "high", "low", "close", "volume"]:
         if a not in df.columns and a.capitalize() in df.columns:
             rename_map[a.capitalize()] = a
     df = df.rename(columns=rename_map)
@@ -573,7 +544,7 @@ def upload_models_folder_to_hf(dataset_id: str, local_models_dir: str, repo_subd
         repo_type="dataset",
         folder_path=local_models_dir,
         path_in_repo=repo_subdir,
-        commit_message=f"Upload {repo_subdir} ({datetime.utcnow().isoformat()}Z)",
+        commit_message=f"Upload {repo_subdir} ({datetime.now(timezone.utc).isoformat()})",
     )
 
 
@@ -592,8 +563,9 @@ class TrainConfig:
     train_ratio: float = 0.9
     seed: int = 42
     time_budget_min: int = 120
-    max_models: int = 0  # 0 means all
+    max_models: int = 0
     intervals: tuple[str, ...] = ("15m", "1h")
+    hf_token: str = ""
 
 
 def parse_args() -> TrainConfig:
@@ -609,6 +581,7 @@ def parse_args() -> TrainConfig:
     p.add_argument("--time_budget_min", type=int, default=120)
     p.add_argument("--max_models", type=int, default=0)
     p.add_argument("--intervals", type=str, default="15m,1h")
+    p.add_argument("--hf_token", type=str, default="")
 
     a = p.parse_args()
     intervals = tuple([s.strip() for s in a.intervals.split(",") if s.strip()])
@@ -625,6 +598,7 @@ def parse_args() -> TrainConfig:
         time_budget_min=a.time_budget_min,
         max_models=a.max_models,
         intervals=intervals,
+        hf_token=a.hf_token or "",
     )
 
 
@@ -654,8 +628,6 @@ def main() -> int:
         return 1
 
     _print_step("2/7", "Dependencies check")
-    # In Colab, most deps are preinstalled. Keep it minimal and fast.
-    # If missing, user can pre-install via pip. Script proceeds.
     try:
         import huggingface_hub  # noqa: F401
         _print_kv("huggingface_hub", "ok")
@@ -677,7 +649,6 @@ def main() -> int:
         print(f"Dataset download failed: {type(e).__name__}: {e}")
         return 1
 
-    # Build list of (symbol, interval, csv_path)
     pairs = []
     for pth in csv_paths:
         meta = parse_symbol_interval_from_filename(pth)
@@ -721,16 +692,19 @@ def main() -> int:
             df_raw = load_csv(csv_path)
             df_feat, feature_cols = add_price_features(df_raw)
 
-            # Determine split row by time (on rows, before sequences)
             n_rows = len(df_feat)
             train_end_row = int(n_rows * cfg.train_ratio)
+            if train_end_row <= 50:
+                raise ValueError(f"Train split too small: train_end_row={train_end_row}, rows={n_rows}")
 
-            # Fit scaler on train rows only
+            # Ensure numeric dtype to avoid pandas assignment warnings
+            df_feat.loc[:, feature_cols] = df_feat[feature_cols].astype(np.float32)
+
+            # Fit scaler on train rows only, then transform ALL rows (same shape)
             scaler = RobustScaler()
-            df_feat.loc[:, feature_cols] = scaler.fit_transform(df_feat.loc[: train_end_row - 1, feature_cols])
-            df_feat.loc[train_end_row:, feature_cols] = scaler.transform(df_feat.loc[train_end_row:, feature_cols])
+            scaler.fit(df_feat.loc[: train_end_row - 1, feature_cols].values)
+            df_feat.loc[:, feature_cols] = scaler.transform(df_feat[feature_cols].values).astype(np.float32)
 
-            # Build sequences
             X, y_price, y_vol, base_close, end_index = create_multihorizon_sequences(
                 df_feat,
                 feature_cols,
@@ -764,7 +738,6 @@ def main() -> int:
 
             model = build_v9_model(cfg.seq_len, X_train.shape[-1], cfg.pred_len, cfg.lr)
 
-            # Per-model output paths
             out_dir = os.path.join(local_models_v9, symbol)
             _safe_mkdir(out_dir)
             ckpt_path = os.path.join(out_dir, f"{symbol}_{interval}_v9_best.keras")
@@ -772,7 +745,6 @@ def main() -> int:
             scaler_path = os.path.join(out_dir, f"{symbol}_{interval}_v9_scaler.json")
             meta_path = os.path.join(out_dir, f"{symbol}_{interval}_v9_meta.json")
 
-            # Callbacks
             val_mape_cb = ValMAPECallback(X_val, y_price_val, base_close_val, cfg.pred_len)
             time_cb = TimeBudgetCallback(deadline_ts)
             callbacks = [
@@ -791,10 +763,8 @@ def main() -> int:
                 callbacks=callbacks,
             )
 
-            # Save final model
             model.save(final_path)
 
-            # Save scaler params
             scaler_payload = {
                 "type": "RobustScaler",
                 "center_": scaler.center_.tolist() if hasattr(scaler, "center_") else None,
@@ -806,7 +776,6 @@ def main() -> int:
             with open(scaler_path, "w", encoding="utf-8") as f:
                 json.dump(scaler_payload, f, ensure_ascii=False, indent=2)
 
-            # Compute final val MAPE on full val set (close)
             pred = model.predict(X_val, verbose=0)
             pred_close = _reconstruct_close_from_returns(base_close_val, pred["price"][:, :, 0])
             true_close = _reconstruct_close_from_returns(base_close_val, y_price_val[:, :, 0])
@@ -816,7 +785,7 @@ def main() -> int:
                 "symbol": symbol,
                 "interval": interval,
                 "version": "v9",
-                "created_at": datetime.utcnow().isoformat() + "Z",
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "rows": int(len(df_raw)),
                 "rows_after_features": int(len(df_feat)),
                 "n_features": int(len(feature_cols)),
@@ -851,8 +820,8 @@ def main() -> int:
     _print_step("5/7", "Save summary")
 
     summary = {
-        "started_at": datetime.utcfromtimestamp(start_ts).isoformat() + "Z",
-        "finished_at": datetime.utcnow().isoformat() + "Z",
+        "started_at": datetime.fromtimestamp(start_ts, tz=timezone.utc).isoformat(),
+        "finished_at": datetime.now(timezone.utc).isoformat(),
         "time_budget_min": cfg.time_budget_min,
         "dataset_id": cfg.dataset_id,
         "version": "v9",
@@ -873,10 +842,16 @@ def main() -> int:
     print("If upload is not needed now, just press Enter when prompted and the script will skip upload.")
 
     try:
-        import getpass
+        token = (cfg.hf_token or "").strip()
+        if not token:
+            token = (os.environ.get("HF_TOKEN", "") or "").strip()
 
-        token = getpass.getpass("Enter HuggingFace token (leave blank to skip upload): ")
-        token = token.strip()
+        if not token:
+            try:
+                token = input("Enter HuggingFace token (leave blank to skip upload): ").strip()
+            except EOFError:
+                token = ""
+
         if token:
             upload_models_folder_to_hf(
                 dataset_id=cfg.dataset_id,
@@ -887,6 +862,7 @@ def main() -> int:
             print("Upload completed.")
         else:
             print("Upload skipped.")
+
     except Exception as e:
         print(f"Upload failed: {type(e).__name__}: {e}")
 
