@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
 """colab_workflow_v9.py
 
-V9.4 "Smooth Operator" Crypto Forecast Trainer
+V9.5 "Zero-Lag" Crypto Forecast Trainer
 
 Key goals:
-- Eliminate "spiky" predictions by removing Vol Head and using Log-Cosh loss.
-- Increase seq_len to 96 (approx 24h for 15m) to capture robust trends.
-- Use Tanh + scaling in output layer to physically limit single-step drift.
-- Switch to StandardScaler for better handling of normal distributions.
-- Simplify architecture to pure LSTM + Attention without auxiliary tasks.
+- Reduce lag by punishing directional errors (wrong sign) more heavily.
+- Add "velocity" and "acceleration" features (ROC, MACD Histogram) to help pre-empt turns.
+- Revert to Huber loss for sharper reaction than Log-Cosh, but keep Tanh clip for safety.
+- Explicitly penalize lag: Loss = Huber + 2.0 * Direction_Error.
 
 Workflow:
   1) env setup
   2) fetch data
-  3) train (epochs up to 100)
+  3) train
   4) save
-  5) upload (optional)
 
 Colab (GPU) one-liner:
 !curl -s https://raw.githubusercontent.com/caizongxun/trainer/main/colab_workflow_v9.py | python3 -
@@ -91,7 +89,7 @@ def _configure_tf() -> dict:
 
 
 # ------------------------------
-# Feature engineering
+# Feature engineering (V9.5 Enhanced)
 # ------------------------------
 
 def _wilder_rsi(close: pd.Series, period: int = 14) -> pd.Series:
@@ -102,7 +100,6 @@ def _wilder_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
     rs = avg_gain / (avg_loss + 1e-12)
     return 100.0 - (100.0 / (1.0 + rs))
-
 
 def add_price_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     d = df.copy()
@@ -124,36 +121,49 @@ def add_price_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
 
     d = d.dropna().sort_values("open_time").reset_index(drop=True)
 
-    # Log returns
+    # 1. Base Log returns
     d["log_ret"] = np.log(d["close"] / d["close"].shift(1))
     
-    # Shadows and ranges
+    # 2. Shadows and ranges
     d["upper_shadow"] = (d["high"] - np.maximum(d["close"], d["open"])) / d["close"]
     d["lower_shadow"] = (np.minimum(d["close"], d["open"]) - d["low"]) / d["close"]
     d["body"] = (d["close"] - d["open"]) / d["open"]
     
-    # RSI
+    # 3. RSI
     d["rsi"] = _wilder_rsi(d["close"]) / 100.0
     
-    # Volume
+    # 4. Volume
     d["log_vol"] = np.log1p(d["volume"])
     d["log_vol_diff"] = d["log_vol"].diff()
 
-    # Time
+    # 5. Time
     d["hour_sin"] = np.sin(2 * np.pi * d["open_time"].dt.hour / 24.0)
     d["dow_sin"] = np.sin(2 * np.pi * d["open_time"].dt.dayofweek / 7.0)
 
-    # Moving Averages distance
+    # 6. Moving Averages distance (Trend)
     for span in [7, 25, 99]:
         ema = d["close"].ewm(span=span, adjust=False).mean()
         d[f"dist_ema{span}"] = np.log(d["close"] / ema)
+
+    # 7. V9.5 New: Momentum & Acceleration Features
+    # ROC (Rate of Change) - Velocity
+    d["roc_6"] = d["close"].pct_change(6)
+    d["roc_12"] = d["close"].pct_change(12)
+    
+    # MACD Histogram - Acceleration (detects turns before they happen)
+    ema12 = d["close"].ewm(span=12, adjust=False).mean()
+    ema26 = d["close"].ewm(span=26, adjust=False).mean()
+    macd = ema12 - ema26
+    signal = macd.ewm(span=9, adjust=False).mean()
+    d["macd_hist"] = macd - signal  # This is a leading indicator for momentum shifts
 
     d = d.dropna().reset_index(drop=True)
 
     feature_cols = [
         "log_ret", "upper_shadow", "lower_shadow", "body", 
         "rsi", "log_vol", "log_vol_diff", "hour_sin", "dow_sin",
-        "dist_ema7", "dist_ema25", "dist_ema99"
+        "dist_ema7", "dist_ema25", "dist_ema99",
+        "roc_6", "roc_12", "macd_hist"
     ]
     return d, feature_cols
 
@@ -180,7 +190,6 @@ def create_sequences(df: pd.DataFrame, cols: list[str], seq_len: int, pred_len: 
         base_close[i] = bc
         
         # Target: Log return of future close vs base close
-        # shape (pred_len,)
         future_close = close[i + seq_len : i + seq_len + pred_len]
         y[i] = np.log(future_close / bc)
 
@@ -188,52 +197,49 @@ def create_sequences(df: pd.DataFrame, cols: list[str], seq_len: int, pred_len: 
 
 
 # ------------------------------
-# Model V9.4
+# Model V9.5 Zero-Lag
 # ------------------------------
 
-def build_model_v9_4(seq_len: int, n_feat: int, pred_len: int, lr: float):
+def build_model_v9_5(seq_len: int, n_feat: int, pred_len: int, lr: float):
     from tensorflow.keras import layers, Model
     
     inp = layers.Input(shape=(seq_len, n_feat))
     
-    # 1. Convolutional feature extraction
+    # 1. Conv1D for local pattern extraction
     x = layers.Conv1D(64, 3, activation="swish", padding="same")(inp)
-    x = layers.Conv1D(64, 3, activation="swish", padding="same")(x)
-    x = layers.MaxPooling1D(2)(x)  # Downsample to see wider context
+    x = layers.MaxPooling1D(2)(x)
     
-    # 2. LSTM context
-    x = layers.Bidirectional(layers.LSTM(128, return_sequences=True, dropout=0.25))(x)
-    x = layers.Bidirectional(layers.LSTM(64, return_sequences=False, dropout=0.25))(x)
+    # 2. Bidirectional LSTM for sequence context
+    x = layers.Bidirectional(layers.LSTM(128, return_sequences=True, dropout=0.2))(x)
+    x = layers.Bidirectional(layers.LSTM(64, return_sequences=False, dropout=0.2))(x)
     
     # 3. Dense Head
     x = layers.Dense(128, activation="swish")(x)
     x = layers.Dropout(0.2)(x)
     
-    # 4. Tanh Output Limiter
-    # Output is log-return. We constrain it to +/- 0.10 per step range to prevent explosions
+    # 4. Tanh Output Limiter (Safety first)
     raw_out = layers.Dense(pred_len)(x)
-    # Scale Tanh: max possible movement is +/- 0.10 (approx 10%) relative to base
-    # This prevents the model from ever predicting a 50% crash in 10 steps
     out = layers.Activation("tanh")(raw_out) 
     out = layers.Rescaling(scale=0.1)(out) 
     
-    model = Model(inp, out, name="v9.4_smooth_operator")
+    model = Model(inp, out, name="v9.5_zero_lag")
 
-    # Log-Cosh Loss: Smooth L1-like loss that suppresses outliers
-    def log_cosh_loss(y_true, y_pred):
-        return tf.reduce_mean(tf.math.log(tf.cosh(y_true - y_pred)))
-    
-    # Shape loss to force smoothness across horizon
-    def shape_loss(y_true, y_pred):
-        dy_true = y_true[:, 1:] - y_true[:, :-1]
-        dy_pred = y_pred[:, 1:] - y_pred[:, :-1]
-        return tf.reduce_mean(tf.square(dy_true - dy_pred))
-
-    def total_loss(y_true, y_pred):
-        return log_cosh_loss(y_true, y_pred) + 5.0 * shape_loss(y_true, y_pred)
+    # V9.5 Custom Loss: Directional Penalty
+    def zero_lag_loss(y_true, y_pred):
+        # 1. Standard Huber loss (robust regression)
+        huber = tf.keras.losses.Huber(delta=1.0)(y_true, y_pred)
+        
+        # 2. Directional Penalty
+        # If signs match (product > 0), penalty is 0.
+        # If signs differ (product < 0), penalty is |y_pred|.
+        # We punish the model for predicting a move in the WRONG direction.
+        sign_mismatch = tf.where(tf.math.multiply(y_true, y_pred) < 0, tf.abs(y_pred - y_true), 0.0)
+        dir_penalty = tf.reduce_mean(sign_mismatch)
+        
+        return huber + 2.0 * dir_penalty
 
     opt = tf.keras.optimizers.AdamW(learning_rate=lr, weight_decay=1e-3)
-    model.compile(optimizer=opt, loss=total_loss, metrics=["mae"])
+    model.compile(optimizer=opt, loss=zero_lag_loss, metrics=["mae"])
     
     return model
 
@@ -252,8 +258,8 @@ def main():
     parser.add_argument("--hf_token", type=str, default="")
     args = parser.parse_args()
 
-    # Fixed hyperparams for V9.4
-    SEQ_LEN = 96  # ~24 hours for 15m
+    # Fixed hyperparams
+    SEQ_LEN = 96
     PRED_LEN = 10
     
     _print_step("1/5", "Setup")
@@ -263,9 +269,7 @@ def main():
     _print_step("2/5", "Data")
     from huggingface_hub import snapshot_download
     
-    # Fix: snapshot_download allow_patterns is tricky.
-    # We download all json/csv files to be safe, then filter locally.
-    # Force ignore_patterns=None to avoid any default ignores
+    # Robust download logic
     path = snapshot_download(
         repo_id="zongowo111/cpb-models", 
         repo_type="dataset",
@@ -273,10 +277,8 @@ def main():
         ignore_patterns=None
     )
     
-    # Recursive search for the CSV file
     csv_file = None
     all_files_found = []
-    
     for root, _, files in os.walk(path):
         for f in files:
             all_files_found.append(f)
@@ -287,18 +289,15 @@ def main():
             break
             
     if not csv_file:
-        print(f"DEBUG: Found {len(all_files_found)} files in {path}. First 20: {all_files_found[:20]}")
-        raise ValueError(f"No CSV found for {args.symbol} {args.interval} in {path}")
+        print(f"DEBUG: Found {len(all_files_found)} files. First 20: {all_files_found[:20]}")
+        raise ValueError(f"No CSV found for {args.symbol} {args.interval}")
         
     _print_kv("csv", csv_file)
     
     df = pd.read_csv(csv_file)
     df, features = add_price_features(df)
     
-    # Split
     train_size = int(len(df) * 0.9)
-    
-    # Scaler: StandardScaler (Z-score)
     scaler = StandardScaler()
     df.loc[:train_size-1, features] = scaler.fit_transform(df.loc[:train_size-1, features])
     df.loc[train_size:, features] = scaler.transform(df.loc[train_size:, features])
@@ -309,10 +308,9 @@ def main():
     X_train, y_train = X[train_mask], y[train_mask]
     X_val, y_val, b_val = X[~train_mask], y[~train_mask], base_close[~train_mask]
     
-    _print_step("3/5", "Train V9.4")
-    model = build_model_v9_4(SEQ_LEN, len(features), PRED_LEN, 1e-3)
+    _print_step("3/5", "Train V9.5")
+    model = build_model_v9_5(SEQ_LEN, len(features), PRED_LEN, 1e-3)
     
-    # Callback to track real price error
     class ValPriceMAE(tf.keras.callbacks.Callback):
         def on_epoch_end(self, epoch, logs=None):
             if epoch % 2 == 0:
@@ -340,29 +338,26 @@ def main():
         verbose=1
     )
     
-    # Save artifacts
     out_dir = f"./all_models/models_v9/{args.symbol}"
     _safe_mkdir(os.path.join(out_dir, "plots"))
     model.save(os.path.join(out_dir, f"{args.symbol}_{args.interval}_v9.keras"))
     
-    # Plotting
     import matplotlib.pyplot as plt
     pred_log = model.predict(X_val, verbose=0)
     pred_p = b_val[:, None] * np.exp(pred_log)
     true_p = b_val[:, None] * np.exp(y_val)
     
-    # H=1 and H=10
     plt.figure(figsize=(12, 8))
     plt.subplot(2, 1, 1)
     plt.plot(true_p[:, 0], label="True")
     plt.plot(pred_p[:, 0], label="Pred", alpha=0.8)
-    plt.title(f"{args.symbol} {args.interval} Horizon=1")
+    plt.title(f"{args.symbol} {args.interval} Horizon=1 (Zero-Lag)")
     plt.legend()
     
     plt.subplot(2, 1, 2)
     plt.plot(true_p[:, -1], label="True")
     plt.plot(pred_p[:, -1], label="Pred", alpha=0.8)
-    plt.title(f"{args.symbol} {args.interval} Horizon={PRED_LEN}")
+    plt.title(f"{args.symbol} {args.interval} Horizon={PRED_LEN} (Zero-Lag)")
     plt.legend()
     
     plt.tight_layout()
