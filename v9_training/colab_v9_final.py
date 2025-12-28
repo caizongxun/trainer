@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# Compact V9 Training Script for Colab - No dependencies issues
-
 import subprocess, sys
 print('[SETUP] Installing packages...')
 for pkg in ['tensorflow>=2.13.0', 'xgboost>=2.0.0', 'datasets>=2.14.0', 'ta>=0.10.2', 'scikit-learn']:
@@ -20,7 +18,7 @@ from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCh
 from tensorflow.keras.regularizers import l2
 import xgboost as xgb
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_squared_error, mean_absolute_error, mean_absolute_percentage_error, r2_score, accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.metrics import mean_squared_error, mean_absolute_error, mean_absolute_percentage_error, r2_score, accuracy_score, f1_score, roc_auc_score
 import ta
 from datasets import load_dataset
 
@@ -203,27 +201,10 @@ class Pipeline:
     def step6b(self, Xt, Xv, Xte, yvt, yvv, yvte):
         print('\n' + '='*80 + '\n[STEP 6b/7] VOLATILITY\n' + '='*80)
         Xt2 = Xt.reshape(Xt.shape[0], -1)
-        Xv2 = Xv.reshape(Xv.shape[0], -1)
         Xte2 = Xte.reshape(Xte.shape[0], -1)
-        
-        m = xgb.XGBRegressor(
-            n_estimators=300,
-            max_depth=6,
-            learning_rate=0.05,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            objective='reg:squarederror',
-            random_state=42,
-            verbosity=0
-        )
-        
-        print('[INFO] Training with early stopping...')
-        m.fit(
-            Xt2, yvt,
-            eval_set=[(Xv2, yvv)],
-            verbose=False
-        )
-        
+        m = xgb.XGBRegressor(n_estimators=100, max_depth=5, learning_rate=0.1, random_state=42, verbosity=0)
+        print('[INFO] Training volatility model...')
+        m.fit(Xt2, yvt, verbose=False)
         yp = m.predict(Xte2)
         rmse = np.sqrt(mean_squared_error(yvte, yp))
         mape = mean_absolute_percentage_error(yvte, yp)
