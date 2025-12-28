@@ -47,7 +47,6 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.callbacks import Callback
 
 
 def _print_step(step: str, msg: str) -> None:
@@ -413,7 +412,7 @@ def _mape(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.mean(np.abs((a - b) / denom)))
 
 
-class ValMAPECallback(Callback):
+class ValMAPECallback(tf.keras.callbacks.Callback):
     """Compute validation MAPE on reconstructed close prices and inject into logs."""
 
     def __init__(
@@ -424,9 +423,8 @@ class ValMAPECallback(Callback):
         pred_len: int,
         max_batches: int = 20,
     ):
-        # Do NOT call super().__init__() with no args if using legacy Keras or certain TF versions
-        # Just manually set model to None (Keras will set it later via set_model)
-        self.model = None
+        # Explicitly initialize base class (required for Keras < 2.16 and safe for newer)
+        super().__init__()
         self.X_val = X_val
         self.y_price_val = y_price_val
         self.base_close_val = base_close_val
@@ -456,9 +454,9 @@ class ValMAPECallback(Callback):
         logs["val_mape_close"] = mape_close
 
 
-class TimeBudgetCallback(Callback):
+class TimeBudgetCallback(tf.keras.callbacks.Callback):
     def __init__(self, deadline_ts: float):
-        self.model = None
+        super().__init__()
         self.deadline_ts = deadline_ts
 
     def on_batch_end(self, batch, logs=None):
