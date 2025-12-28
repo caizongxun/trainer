@@ -35,7 +35,6 @@ from datasets import load_dataset
 print('[INIT] V9 BTC 1h Training Pipeline Started')
 print(f'[INIT] Timestamp: {datetime.now()}')
 print(f'[INIT] GPU Available: {len(tf.config.list_physical_devices("GPU")) > 0}')
-print(f'[INIT] TA Library Version: {ta.__version__}')
 print()
 
 logger = logging.getLogger(__name__)
@@ -127,7 +126,7 @@ class V9TrainingPipeline:
             result = ta.momentum.rsi(data[col], window=window)
             return result
         except:
-            self.log(f'RSI({window}) failed, using manual calculation', level='DEBUG')
+            self.log(f'RSI({window}) fallback to manual calculation', level='DEBUG')
             delta = data[col].diff()
             gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
@@ -136,7 +135,7 @@ class V9TrainingPipeline:
             return rsi
 
     def calculate_macd(self, data, col='close', fast=12, slow=26, signal=9):
-        """Calculate MACD with full fallback"""
+        """Calculate MACD with fallback"""
         try:
             ema_fast = ta.trend.ema_indicator(data[col], window=fast)
             ema_slow = ta.trend.ema_indicator(data[col], window=slow)
@@ -145,7 +144,7 @@ class V9TrainingPipeline:
             macd_diff = macd - signal_line
             return macd, signal_line, macd_diff
         except Exception as e:
-            self.log(f'MACD calculation failed: {str(e)}, using manual', level='DEBUG')
+            self.log(f'MACD fallback to manual calculation', level='DEBUG')
             ema_fast = data[col].ewm(span=fast).mean()
             ema_slow = data[col].ewm(span=slow).mean()
             macd = ema_fast - ema_slow
@@ -162,7 +161,7 @@ class V9TrainingPipeline:
             lower = sma - (std * 2)
             return upper, sma, lower
         except:
-            self.log('Bollinger Bands failed, using manual calculation', level='DEBUG')
+            self.log('Bollinger Bands fallback to manual calculation', level='DEBUG')
             sma = data[col].rolling(window=window).mean()
             std = data[col].rolling(window=window).std()
             upper = sma + (std * 2)
@@ -180,7 +179,7 @@ class V9TrainingPipeline:
             atr = true_range.ewm(alpha=1/window).mean()
             return atr
         except Exception as e:
-            self.log(f'ATR failed: {str(e)}, using simple version', level='DEBUG')
+            self.log(f'ATR fallback to simple calculation', level='DEBUG')
             high_low = data['high'] - data['low']
             return high_low.rolling(window=window).mean()
 
