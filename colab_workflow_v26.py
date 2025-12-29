@@ -40,7 +40,7 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     d['macd_signal'] = d['macd'].ewm(span=9, adjust=False).mean()
     d['macd_hist'] = d['macd'] - d['macd_signal']
     
-    d['atr'] = pd.concat([d['high']-d['low'], (d['high']-d['close'].shift()).abs(), (d['low']-d['close"].shift()).abs()], axis=1).max(axis=1).rolling(14).mean()
+    d['atr'] = pd.concat([d['high']-d['low'], (d['high']-d['close'].shift()).abs(), (d['low']-d['close'].shift()).abs()], axis=1).max(axis=1).rolling(14).mean()
     
     # 2. Rolling Stats (The "Context")
     for window in [20, 50]:
@@ -122,13 +122,12 @@ def main():
     df = label_targets(df)
     
     # Prepare Data for LightGBM
-    # Drop ALL non-numeric columns explicitly
-    exclude_cols = ['open_time', 'close_time', 'target', 'ignore'] 
-    # Also drop original OHLCV if we want to force model to use derived features (optional, but safer to keep)
+    # Explicitly drop 'close_time' and 'ignore' which are often object/mixed
+    exclude_cols = ['open_time', 'close_time', 'ignore', 'target'] 
     
+    # Also drop original OHLCV to avoid confusion, keep only numeric derived features
     feature_cols = [c for c in df.columns if c not in exclude_cols and pd.api.types.is_numeric_dtype(df[c])]
     
-    # Double check no object columns remain
     X = df[feature_cols]
     y = df['target']
     
