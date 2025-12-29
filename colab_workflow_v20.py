@@ -3,27 +3,24 @@
 
 V20 "The Alpha Factory" (Evolutionary Regime-Specific Formula Discovery)
 
-What’s new vs V19
-- Adds more "building blocks" (domain features) as GP terminals to improve search efficiency:
-  - EMA20
-  - ATR14
-  - Bollinger Band Width (BBWidth)
-  - ROC10 (Rate of Change)
-  - MFI14 (Money Flow Index)
-  - ADX (already computed for regime, now also usable by GP)
-  - RangeZ (volatility z-score, already computed for regime, now also usable by GP)
-- Keeps V19 early stopping ("train until no longer improves"):
-  - --max_gens (hard cap)
-  - --patience (stop after N gens with no improvement)
-  - --min_delta (minimum improvement)
-- Adds optional bloat control (limits GP tree growth):
-  - --max_height (default 17)
-  - --max_nodes  (default 200)
+New in this update (still V20)
+- Adds optional GPU acceleration for GP evaluation using CuPy:
+  - --use_gpu
+  - When enabled, GP primitives run on CuPy arrays (GPU), while data loading/feature engineering and GMM remain on CPU.
 
-Run on Colab
-!pip install deap && curl -s https://raw.githubusercontent.com/caizongxun/trainer/main/colab_workflow_v20.py | python3 - \
+V20 features
+- Adds more "building blocks" (domain features) as GP terminals:
+  - EMA20, ATR14, BBWidth, ROC10, MFI14, ADX, RangeZ
+- Keeps V19 early stopping ("train until no longer improves"):
+  - --max_gens, --patience, --min_delta
+- Optional bloat control:
+  - --max_height, --max_nodes
+
+Run on Colab (GPU)
+!pip install deap cupy-cuda12x && curl -s https://raw.githubusercontent.com/caizongxun/trainer/main/colab_workflow_v20.py | python3 - \
   --symbol BTCUSDT --interval 15m --pop_size 2000 \
-  --max_gens 10000 --patience 100 --min_delta 1e-4
+  --max_gens 10000 --patience 100 --min_delta 1e-4 \
+  --use_gpu
 
 Artifacts
 - text : ./all_models/models_v20/{symbol}/alpha_factory_report.txt
@@ -38,6 +35,9 @@ import pandas as pd
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
 from deap import base, creator, tools, gp
+
+# Backend (NumPy by default; optionally switched to CuPy in main via --use_gpu)
+XP = np
 
 
 def _safe_mkdir(path: str) -> None:
@@ -55,8 +55,33 @@ def _as_float(x):
     return float(x)
 
 
+def _to_py_scalar(x):
+    """Convert numpy/cupy scalar to python float/int."""
+    try:
+        return x.item()
+    except Exception:
+        return float(x)
+
+
+def _maybe_to_xp(arr, use_gpu: bool, dtype=None):
+    if not use_gpu:
+        return arr
+    # Cast to float32 by default for VRAM efficiency unless caller requests otherwise.
+    if dtype is None:
+        dtype = XP.float32
+    try:
+        return XP.asarray(arr, dtype=dtype)
+    except Exception:
+        return XP.asarray(arr)
+
+
+def _xp_errstate(**kwargs):
+    # Both numpy and cupy provide errstate.
+    return XP.errstate(**kwargs)
+
+
 # ------------------------------
-# 1. Feature Engineering
+# 1. Feature Engineering (CPU)
 # ------------------------------
 
 def add_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -125,7 +150,7 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ------------------------------
-# 2. Regime Classification (GMM)
+# 2. Regime Classification (CPU)
 # ------------------------------
 
 def classify_regimes(df: pd.DataFrame) -> np.ndarray:
@@ -145,7 +170,7 @@ def classify_regimes(df: pd.DataFrame) -> np.ndarray:
 
 
 # ------------------------------
-# 3. Labeling Targets (Ground Truth)
+# 3. Labeling Targets (CPU)
 # ------------------------------
 
 def label_targets(df: pd.DataFrame) -> pd.DataFrame:
@@ -168,23 +193,45 @@ def label_targets(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ------------------------------
-# 4. Genetic Programming Engine
+# 4. GP primitives (CPU/GPU depending on XP)
 # ------------------------------
 
+def add(a, b):
+    return XP.add(a, b)
+
+
+def sub(a, b):
+    return XP.subtract(a, b)
+
+
+def mul(a, b):
+    return XP.multiply(a, b)
+
+
+def neg(a):
+    return XP.negative(a)
+
+
+def absv(a):
+    return XP.abs(a)
+
+
 def protectedDiv(left, right):
-    with np.errstate(divide="ignore", invalid="ignore"):
-        x = np.divide(left, right)
-        if isinstance(x, np.ndarray):
-            x[np.isinf(x)] = 1
-            x[np.isnan(x)] = 1
-        elif np.isinf(x) or np.isnan(x):
-            return 1
+    with _xp_errstate(divide="ignore", invalid="ignore"):
+        x = XP.divide(left, right)
+        # Replace inf/nan with 1 (vectorized)
+        x = XP.where(XP.isinf(x), 1, x)
+        x = XP.where(XP.isnan(x), 1, x)
     return x
 
 
 def if_then(condition, out1, out2):
-    return np.where(condition > 0, out1, out2)
+    return XP.where(condition > 0, out1, out2)
 
+
+# ------------------------------
+# 5. GP setup
+# ------------------------------
 
 # Terminals ("building blocks")
 # 14 inputs
@@ -203,12 +250,12 @@ def if_then(condition, out1, out2):
 # 12: ADX
 # 13: RangeZ
 pset = gp.PrimitiveSet("MAIN", 14)
-pset.addPrimitive(np.add, 2, name="add")
-pset.addPrimitive(np.subtract, 2, name="sub")
-pset.addPrimitive(np.multiply, 2, name="mul")
+pset.addPrimitive(add, 2, name="add")
+pset.addPrimitive(sub, 2, name="sub")
+pset.addPrimitive(mul, 2, name="mul")
 pset.addPrimitive(protectedDiv, 2, name="div")
-pset.addPrimitive(np.negative, 1, name="neg")
-pset.addPrimitive(np.abs, 1, name="abs")
+pset.addPrimitive(neg, 1, name="neg")
+pset.addPrimitive(absv, 1, name="abs")
 pset.addPrimitive(if_then, 3, name="if_gt_0")
 
 pset.renameArguments(ARG0="Close")
@@ -243,9 +290,9 @@ toolbox.register("mate", gp.cxOnePoint)
 toolbox.register("expr_mut", gp.genFull, min_=0, max_=2)
 toolbox.register("mutate", gp.mutUniform, expr=toolbox.expr_mut, pset=pset)
 
-# Global Data for Eval
+# Global Data for Eval (NumPy or CuPy arrays)
 GLOBAL_INPUTS = {}
-GLOBAL_TARGET = []
+GLOBAL_TARGET = None
 
 
 def eval_formula(individual):
@@ -271,26 +318,26 @@ def eval_formula(individual):
         output = func(*args)
 
         # Convert output to signal (threshold > 0)
-        signal = (output > 0).astype(int)
+        signal = (output > 0).astype(XP.int32)
 
-        hits = np.sum((signal == 1) & (GLOBAL_TARGET == 1))
-        total_signals = np.sum(signal == 1)
-
+        hits = _to_py_scalar(XP.sum((signal == 1) & (GLOBAL_TARGET == 1)))
+        total_signals = _to_py_scalar(XP.sum(signal == 1))
         if total_signals == 0:
-            return (0,)
+            return (0.0,)
 
-        precision = hits / total_signals
+        precision = float(hits) / float(total_signals)
 
         # Penalize if too few signals
         if total_signals < 10:
             precision *= 0.1
 
-        recall = hits / (np.sum(GLOBAL_TARGET == 1) + 1e-9)
-        f1 = 2 * (precision * recall) / (precision + recall + 1e-9)
+        target_ones = _to_py_scalar(XP.sum(GLOBAL_TARGET == 1))
+        recall = float(hits) / float(target_ones + 1e-9)
+        f1 = 2.0 * (precision * recall) / (precision + recall + 1e-9)
 
-        return (f1,)
+        return (float(f1),)
     except Exception:
-        return (0,)
+        return (0.0,)
 
 
 toolbox.register("evaluate", eval_formula)
@@ -391,11 +438,26 @@ def algorithms_eaSimple(
     return population, logbook
 
 
-def evolve_for_task(task_name, target_array, inputs, pop_size=50, gens=5, patience=0, min_delta=0.0):
+def evolve_for_task(
+    task_name,
+    target_array,
+    inputs,
+    pop_size=50,
+    gens=5,
+    patience=0,
+    min_delta=0.0,
+    use_gpu=False,
+):
     print(f"--- Evolving for Task: {task_name} ---")
     global GLOBAL_INPUTS, GLOBAL_TARGET
-    GLOBAL_INPUTS = inputs
-    GLOBAL_TARGET = target_array
+
+    # Move arrays to XP once per task (avoid host<->device copy every eval)
+    GLOBAL_INPUTS = {}
+    for k, v in inputs.items():
+        GLOBAL_INPUTS[k] = _maybe_to_xp(v, use_gpu=use_gpu, dtype=None)
+
+    # Targets as int32 on the same backend
+    GLOBAL_TARGET = _maybe_to_xp(target_array.astype(np.int32), use_gpu=use_gpu, dtype=XP.int32)
 
     pop = toolbox.population(n=pop_size)
     hof = tools.HallOfFame(1)
@@ -430,6 +492,8 @@ def evolve_for_task(task_name, target_array, inputs, pop_size=50, gens=5, patien
         "gens_limit": int(gens),
         "patience": int(patience),
         "min_delta": float(min_delta),
+        "use_gpu": bool(use_gpu),
+        "backend": "cupy" if use_gpu else "numpy",
     }
 
     return str(best), best_score, meta
@@ -440,6 +504,8 @@ def evolve_for_task(task_name, target_array, inputs, pop_size=50, gens=5, patien
 # ------------------------------
 
 def main():
+    global XP
+
     p = argparse.ArgumentParser()
     p.add_argument("--symbol", type=str, default="BTCUSDT")
     p.add_argument("--interval", type=str, default="15m")
@@ -459,10 +525,34 @@ def main():
     p.add_argument("--max_height", type=int, default=17)
     p.add_argument("--max_nodes", type=int, default=200)
 
+    # GPU
+    p.add_argument("--use_gpu", action="store_true")
+
     args = p.parse_args()
 
     random.seed(args.seed)
     np.random.seed(args.seed)
+
+    # Switch backend if requested
+    if args.use_gpu:
+        try:
+            import cupy as cp
+
+            XP = cp
+            try:
+                dev = cp.cuda.runtime.getDevice()
+                props = cp.cuda.runtime.getDeviceProperties(dev)
+                name = props.get("name", b"?")
+                name = name.decode("utf-8") if isinstance(name, (bytes, bytearray)) else str(name)
+                print(f"[GPU] Using CuPy on device {dev}: {name}")
+            except Exception:
+                print("[GPU] Using CuPy (device info unavailable)")
+        except Exception as e:
+            print(f"[GPU] Failed to enable CuPy, fallback to NumPy. Error: {e}")
+            XP = np
+            args.use_gpu = False
+    else:
+        XP = np
 
     max_gens = args.max_gens if args.max_gens is not None else args.generations
 
@@ -549,9 +639,10 @@ def main():
         f.write(f"min_delta: {args.min_delta}\n")
         f.write(f"seed: {args.seed}\n")
         f.write(f"max_height: {args.max_height}\n")
-        f.write(f"max_nodes: {args.max_nodes}\n\n")
+        f.write(f"max_nodes: {args.max_nodes}\n")
+        f.write(f"use_gpu: {args.use_gpu}\n\n")
 
-        # Task A: Range Reversal
+        # Task A
         best_formula, score, meta = evolve_for_task(
             "Range Reversal (Buy Low)",
             df["target_range_buy"].values,
@@ -560,6 +651,7 @@ def main():
             gens=max_gens,
             patience=args.patience,
             min_delta=args.min_delta,
+            use_gpu=args.use_gpu,
         )
         f.write(
             "Task: Range Reversal\n"
@@ -570,7 +662,7 @@ def main():
             f"stop_reason: {meta['stop_reason']}\n\n"
         )
 
-        # Task B: Trend Start
+        # Task B
         best_formula, score, meta = evolve_for_task(
             "Trend Start (Breakout)",
             df["target_trend_start"].values,
@@ -579,6 +671,7 @@ def main():
             gens=max_gens,
             patience=args.patience,
             min_delta=args.min_delta,
+            use_gpu=args.use_gpu,
         )
         f.write(
             "Task: Trend Start\n"
@@ -589,7 +682,7 @@ def main():
             f"stop_reason: {meta['stop_reason']}\n\n"
         )
 
-        # Task C: Trend End
+        # Task C
         best_formula, score, meta = evolve_for_task(
             "Trend End (Climax)",
             df["target_trend_end"].values,
@@ -598,6 +691,7 @@ def main():
             gens=max_gens,
             patience=args.patience,
             min_delta=args.min_delta,
+            use_gpu=args.use_gpu,
         )
         f.write(
             "Task: Trend End\n"
