@@ -339,7 +339,7 @@ def main():
     print("[3/4] Labeling Targets (Trend Start)...")
     df = label_targets(df)
     
-    # Fix: Map CamelCase names to snake_case DataFrame columns explicitly
+    # Correct mapping logic
     mapping = {
         "BodyHeight": "body_height",
         "UpperShadow": "upper_shadow",
