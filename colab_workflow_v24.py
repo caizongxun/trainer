@@ -103,30 +103,18 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     d["mfi14"] = 100.0 - (100.0 / (1.0 + mfr))
     
     # --- NEW: Reversal Features ---
-    
-    # 1. Donchian Position (0~1)
-    # 0 = at 20-day low, 1 = at 20-day high
     donchian_low = d["low"].rolling(20).min()
     donchian_high = d["high"].rolling(20).max()
     d["donchian_pos"] = (d["close"] - donchian_low) / (donchian_high - donchian_low + 1e-12)
     
-    # 2. Stochastic KD (Fast)
     lowest_14 = d["low"].rolling(14).min()
     highest_14 = d["high"].rolling(14).max()
     d["stoch_k"] = 100 * ((d["close"] - lowest_14) / (highest_14 - lowest_14 + 1e-12))
     d["stoch_d"] = d["stoch_k"].rolling(3).mean()
     
-    # 3. RSI Divergence Approximation
-    # Slope of Price (5 bars) vs Slope of RSI (5 bars)
-    # If Price Slope < 0 and RSI Slope > 0 => Bullish Divergence
-    # We provide the raw slopes, let GP find the divergence condition
-    # Linear regression slope approximation: (y - y_mean) * (x - x_mean)
-    # Simplified: just pct_change(5) or diff(5)
     d["slope_price_5"] = d["close"].diff(5)
     d["slope_rsi_5"] = d["rsi"].diff(5)
     
-    # 4. Bollinger %B
-    # Position relative to bands. >1 = above upper, <0 = below lower
     bb_upper = d["sma20"] + 2*d["std20"]
     bb_lower = d["sma20"] - 2*d["std20"]
     d["bb_pct_b"] = (d["close"] - bb_lower) / (bb_upper - bb_lower + 1e-12)
@@ -249,7 +237,7 @@ def eval_dual_formula(individual):
         target_ones = _to_py_scalar(XP.sum(GLOBAL_TARGET == 1))
         recall = float(hits) / float(target_ones + 1e-9)
         
-        beta = 0.5 # Precision weight
+        beta = 0.5 
         f_score = (1 + beta**2) * (precision * recall) / ((beta**2 * precision) + recall + 1e-9)
         return (float(f_score),)
     except: return (0.0,)
@@ -401,15 +389,16 @@ def main():
     print("[4/5] Labeling Targets...")
     df = label_targets(df)
     
-    inputs = {k: _maybe_to_xp(df[k.lower() if k not in ["BBWidth", "RangeZ", "DonchianPos", "StochK", "StochD", "SlopePrice", "SlopeRSI", "BBPctB"] else 
-                              "bb_width" if k=="BBWidth" else 
-                              "range_z" if k=="RangeZ" else
-                              "donchian_pos" if k=="DonchianPos" else
-                              "stoch_k" if k=="StochK" else
-                              "stoch_d" if k=="StochD" else
-                              "slope_price_5" if k=="SlopePrice" else
-                              "slope_rsi_5" if k=="SlopeRSI" else
-                              "bb_pct_b" if k=="BBPctB"].values, args.use_gpu) for k in arg_names}
+    # 這裡的寫法之前有誤，現在改回用明確的 if-else
+    mapping = {
+        "BBWidth": "bb_width", "RangeZ": "range_z",
+        "DonchianPos": "donchian_pos", "StochK": "stoch_k", "StochD": "stoch_d",
+        "SlopePrice": "slope_price_5", "SlopeRSI": "slope_rsi_5", "BBPctB": "bb_pct_b"
+    }
+    inputs = {}
+    for k in arg_names:
+        col_name = mapping.get(k, k.lower())
+        inputs[k] = _maybe_to_xp(df[col_name].values, args.use_gpu)
     
     out_dir = f"./all_models/models_v24/{args.symbol}"
     _safe_mkdir(out_dir)
