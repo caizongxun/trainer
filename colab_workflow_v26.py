@@ -122,13 +122,27 @@ def main():
     df = label_targets(df)
     
     # Prepare Data for LightGBM
-    # Explicitly drop 'close_time' and 'ignore' which are often object/mixed
-    exclude_cols = ['open_time', 'close_time', 'ignore', 'target'] 
+    # Force drop problem columns
+    bad_cols = ['open_time', 'close_time', 'ignore', 'target']
+    # Select only numeric types
+    feature_cols = [c for c in df.columns if c not in bad_cols and pd.api.types.is_numeric_dtype(df[c])]
     
-    # Also drop original OHLCV to avoid confusion, keep only numeric derived features
-    feature_cols = [c for c in df.columns if c not in exclude_cols and pd.api.types.is_numeric_dtype(df[c])]
+    # Verify dtypes
+    X = df[feature_cols].copy()
+    # Fill remaining NaNs with 0 to be safe
+    X = X.fillna(0)
     
-    X = df[feature_cols]
+    # Convert to float32 explicitly to catch any lingering object types
+    try:
+        X = X.astype(np.float32)
+    except ValueError as e:
+        print(f"Error converting to float32: {e}")
+        # Find non-numeric columns
+        for col in X.columns:
+            if not pd.api.types.is_numeric_dtype(X[col]):
+                print(f"Bad column: {col} type: {X[col].dtype}")
+        return
+
     y = df['target']
     
     print(f"Training with {X.shape[1]} features...")
@@ -150,7 +164,8 @@ def main():
         num_leaves=31,
         scale_pos_weight=pos_weight, # Vital for imbalanced data
         random_state=42,
-        n_jobs=-1
+        n_jobs=-1,
+        verbosity=-1
     )
     
     model.fit(X_train, y_train, eval_set=[(X_test, y_test)], eval_metric='logloss', 
