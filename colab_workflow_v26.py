@@ -40,7 +40,7 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     d['macd_signal'] = d['macd'].ewm(span=9, adjust=False).mean()
     d['macd_hist'] = d['macd'] - d['macd_signal']
     
-    d['atr'] = pd.concat([d['high']-d['low'], (d['high']-d['close'].shift()).abs(), (d['low']-d['close'].shift()).abs()], axis=1).max(axis=1).rolling(14).mean()
+    d['atr'] = pd.concat([d['high']-d['low'], (d['high']-d['close'].shift()).abs(), (d['low']-d['close"].shift()).abs()], axis=1).max(axis=1).rolling(14).mean()
     
     # 2. Rolling Stats (The "Context")
     for window in [20, 50]:
@@ -49,7 +49,6 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
         d[f'z_score_{window}'] = (d['close'] - d[f'sma_{window}']) / (d[f'std_{window}'] + 1e-12)
     
     # 3. Lag Features (The "History")
-    # Instead of just current RSI, give model RSI of past 5 bars
     lags = [1, 2, 3, 5, 8]
     for col in ['close', 'volume', 'rsi', 'macd_hist', 'atr']:
         for lag in lags:
@@ -123,9 +122,17 @@ def main():
     df = label_targets(df)
     
     # Prepare Data for LightGBM
-    feature_cols = [c for c in df.columns if c not in ['open_time', 'target', 'open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore']]
+    # Drop ALL non-numeric columns explicitly
+    exclude_cols = ['open_time', 'close_time', 'target', 'ignore'] 
+    # Also drop original OHLCV if we want to force model to use derived features (optional, but safer to keep)
+    
+    feature_cols = [c for c in df.columns if c not in exclude_cols and pd.api.types.is_numeric_dtype(df[c])]
+    
+    # Double check no object columns remain
     X = df[feature_cols]
     y = df['target']
+    
+    print(f"Training with {X.shape[1]} features...")
     
     # Split: Train (80%), Test (20%) - Walk Forward Split (No Shuffle!)
     split_idx = int(len(df) * 0.8)
