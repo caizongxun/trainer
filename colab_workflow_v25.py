@@ -339,7 +339,18 @@ def main():
     print("[3/4] Labeling Targets (Trend Start)...")
     df = label_targets(df)
     
-    inputs = {k: _maybe_to_xp(df[k.lower() if k != "MACD_Hist" else "macd_hist"].values, args.use_gpu) for k in arg_names}
+    # Fix: Map CamelCase names to snake_case DataFrame columns explicitly
+    mapping = {
+        "BodyHeight": "body_height",
+        "UpperShadow": "upper_shadow",
+        "LowerShadow": "lower_shadow",
+        "MACD_Hist": "macd_hist"
+    }
+    
+    inputs = {}
+    for k in arg_names:
+        col_name = mapping.get(k, k.lower())
+        inputs[k] = _maybe_to_xp(df[col_name].values, args.use_gpu)
     
     out_dir = f"./all_models/models_v25/{args.symbol}"
     _safe_mkdir(out_dir)
